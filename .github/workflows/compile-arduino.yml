@@ -1,0 +1,92 @@
+name: Build and Compile Sketch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'xiao-arduino/**'
+      - '.github/workflows/compile-arduino.yml'
+  pull_request:
+    paths:
+      - 'xiao-arduino/**'
+      - '.github/workflows/compile-arduino.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        board: [BOARD_EE02, BOARD_EE04]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Cache Arduino Directories
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15
+            ~/.cache/arduino
+            /tmp/arduino
+          key: ${{ runner.os }}-arduino-${{ hashFiles('**/*.ino', '**/*.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-arduino-
+        
+      - name: Compile Sketch for EE02
+        uses: arduino/compile-sketches@v1
+        with:
+          #platforms: |
+          #  - name: esp32:esp32
+          #    source-url: https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+          fqbn: esp32:esp32:XIAO_ESP32S3_Plus:PSRAM=opi
+          sketch-paths: ./xiao-arduino
+          cli-compile-flags: |
+            - --build-cache-path=/tmp/arduino/build-cache
+            - "--build-property"
+            - "compiler.cpp.extra_flags=-DBOARD=${{ matrix.board }}"
+            - --output-dir=${{ github.workspace }}/xiao-arduino/build_output/${{ matrix.board }}
+          libraries: |
+            - source-url: https://github.com/Seeed-Studio/Seeed_GFX.git
+            - source-url: https://github.com/bakercp/CRC32.git
+            - name: WiFiManager
+      - name: Upload Compiled Binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.board }}
+          path: xiao-arduino/build_output/${{ matrix.board }}/*.bin
+          if-no-files-found: error
+
+  # Publishes the web flasher with the fresh binaries, for builds of main only
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download all board outputs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: BOARD_*
+          path: xiao-arduino/web/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: xiao-arduino/web/
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

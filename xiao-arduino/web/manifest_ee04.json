@@ -1,0 +1,11 @@
+{
+  "name": "Fugleramme for Seeed Xiao EE04",
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "BOARD_EE04/xiao-arduino.ino.merged.bin", "offset": 0 }
+      ]
+    }
+  ]
+}
