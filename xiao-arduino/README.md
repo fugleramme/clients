@@ -19,7 +19,7 @@ On Fugleramme's admin page, enable **External e-ink panel** under **Frame** and 
 
 Option 1: Flash the newest firmware directly to the board using the [web-based Fugleramme flasher](https://fugleramme.github.io/clients/). Your wifi and host settings will not be erased.
 
-Option 2: Download the latest [xiao-arduino.ino.merged.bin](https://fugleramme.github.io/clients/BOARD_EE02/xiao-arduino.ino.merged.bin) file for your board. Press and hold button 2 on your display board for 5 seconds. The frame will wake up and start a configuration portal, displaying the URL and QR code on the screen. Once on the portal, click "OTA Update" and update using your downloaded .bin file.
+Option 2: Download the latest [xiao-arduino.ino.bin](https://fugleramme.github.io/clients/BOARD_EE02/xiao-arduino.ino.bin) file for your board. Press and hold button 2 on your display board for 5 seconds. The frame will wake up and start a configuration portal, displaying the URL and QR code on the screen. Once on the portal, click "OTA Update" and update using your downloaded .bin file.
 
 ## Contributing
 
