@@ -12,12 +12,14 @@ Contributed by [Brent Gerig](https://github.com/brgerig), based on the MicroPyth
 
 On Fugleramme's admin page, enable **External e-ink panel** under **Frame** and set **External panel size** to 13.3". Then:
 
-1. Visit the [web-based Fugleramme flasher](URL to go here), select your board, connect it to your computer, and click "Connect".
+1. Visit the [web-based Fugleramme flasher](https://fugleramme.github.io/clients/), select your board, connect it to your computer, and click "Connect".
 2. The frame will reboot and start a configuration web portal. Follow the on-display instructions to complete setup.
 
 ## Update
 
-Download the latest xiao-arduino.ino.merged.bin file for your board. Press and hold button 2 on your display board for 5 seconds. The frame will wake up and start a configuration portal, displaying the URL and QR code on the screen. Once on the portal, click "OTA Update" and update using your downloaded .bin file.
+Option 1: Flash the newest firmware directly to the board using the [web-based Fugleramme flasher](https://fugleramme.github.io/clients/). Your wifi and host settings will not be erased.
+
+Option 2: Download the latest xiao-arduino.ino.merged.bin file for your board. Press and hold button 2 on your display board for 5 seconds. The frame will wake up and start a configuration portal, displaying the URL and QR code on the screen. Once on the portal, click "OTA Update" and update using your downloaded .bin file.
 
 ## Contributing
 
