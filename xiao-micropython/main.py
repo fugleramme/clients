@@ -1,8 +1,9 @@
-"""Fugleramme's page on a Seeed 13.3" Spectra 6 panel, from a XIAO EE02 board.
+"""Fugleramme's page on a Seeed Spectra 6 panel: the 13.3" from a XIAO EE02
+board, or the 7.3" from a XIAO EE04. config.py's WIDTH and HEIGHT pick which.
 
-MicroPython's SEEED_XIAO_ESP32S3 build (it needs the board's octal PSRAM),
-copied to the board as main.py. Enable "External e-ink panel" on the frame's admin page
-first. Every wake it asks the frame for /frame.e6 with the ETag of the last
+MicroPython's SEEED_XIAO_ESP32S3 build (the 13.3" needs the board's octal
+PSRAM), copied to the board as main.py. Enable "External e-ink panel" on the
+frame's admin page and set "External panel size" to the panel's first. Every wake it asks the frame for /frame.e6 with the ETag of the last
 frame page on the glass (or none if a notice replaced it); an unchanged page
 costs a 304 and nothing else. A new one is downloaded whole, checked, and only
 then sent to the panel. The frame may be served over HTTPS, which the port
@@ -36,12 +37,12 @@ cannot join, steady on while the panel refreshes (~30 s), and three short if
 that refresh failed.
 
 The file format is in Fugleramme's docs
-(https://arnegiacomo.dev/fugleramme/screens/#e6-file-format). The panel's
-command sequence is inspired by Seeed_GFX2's Driver_T133A01.cpp
-(https://github.com/Seeed-Studio/Seeed_GFX2, MIT License, see its LICENSE).
-Several changes were made at once to recover a corrupted panel. They seem
-to fix the failures seen here. They were not bisected, so which change
-matters is not known.
+(https://arnegiacomo.dev/fugleramme/screens/#e6-file-format). The panels'
+command sequences come from Seeed_GFX2's Driver_T133A01.cpp and
+Driver_ED2208.cpp (https://github.com/Seeed-Studio/Seeed_GFX2, MIT License,
+see its LICENSE). The 13.3"'s is only inspired by it: several changes were
+made at once to recover a corrupted panel. They seem to fix the failures seen
+here. They were not bisected, so which change matters is not known.
 GPIO 43 and 44 double as UART0, so use the USB REPL.
 """
 
@@ -52,6 +53,7 @@ import socket
 import ssl
 import struct
 import time
+from collections import namedtuple
 
 import config
 import esp32
@@ -81,11 +83,11 @@ HEIGHT = config.HEIGHT
 # followed by the right-controller rows.
 HEADER = "<4sHBBHHII"
 BLACK, WHITE = 0, 1
-SCALE, MARGIN = 4, 96  # the built-in font is 8 px, far too small at this size
 
-# T133A01 BUSY is active-low: LOW while refreshing, HIGH when idle. A healthy
-# full refresh stays busy for about 28 s, or about 47 s on a cold panel. Treat
-# a missing or very short BUSY-low as a refresh that never started.
+# T133A01 and ED2208 BUSY is active-low: LOW while refreshing, HIGH when idle.
+# A healthy 13.3" full refresh stays busy for about 28 s, or about 47 s on a
+# cold panel. Treat a missing or very short BUSY-low as a refresh that never
+# started.
 REFRESH_START_MS = 2_000
 REFRESH_MIN_BUSY_MS = 10_000
 REFRESH_TIMEOUT_MS = 60_000
@@ -119,15 +121,17 @@ FRESH = {
     "ota_failures": 0,
 }
 
-# EE02 wiring, from Seeed_GFX2's XIAO_ePaper_Board_Configs.h.
+# EE02 and EE04 wiring, from Seeed_GFX2's XIAO_ePaper_Board_Configs.h. Only the
+# EE02 has CS1, for the 13.3"'s second controller.
 SCK, MOSI = 7, 9  # XIAO D8, D10
 CS0, CS1, DC, RST, BUSY, POWER = 44, 41, 10, 38, 4, 43
 
-# Controller-select bit flags for the shared SPI bus.
+# Controller-select bit flags for the shared SPI bus. BOTH reaches every
+# controller a glass has.
 PRIMARY, SECONDARY, BOTH = 1, 2, 3
 
 # Each row is (controller target, register command, command data), in hardware init order.
-INIT = (
+T133A01_INIT = (
     (PRIMARY, 0x74, b"\x00\x0c\x0c\xd9\xdd\xdd\x15\x15\x55"),
     (BOTH, 0xF0, b"\x49\x55\x13\x5d\x05\x10"),
     (BOTH, 0x00, b"\xdf\x69"),
@@ -144,7 +148,75 @@ INIT = (
     (PRIMARY, 0x05, b"\xe0\x20"),
     (PRIMARY, 0xB0, b"\x01"),
     (PRIMARY, 0xB1, b"\x02"),
+    # PLL: absent from the Seeed init. One of the changes added at once.
+    # Whether it matters on its own is not known.
+    (BOTH, 0x30, b"\x08"),
 )
+
+# The 7.3"'s single controller, as Seeed's driver sets it up.
+ED2208_INIT = (
+    (PRIMARY, 0xAA, b"\x49\x55\x20\x08\x09\x18"),
+    (PRIMARY, 0x01, b"\x3f\x00\x32\x2a\x0e\x2a"),
+    (PRIMARY, 0x00, b"\x5f\x69"),
+    (PRIMARY, 0x03, b"\x00\x54\x00\x44"),
+    (PRIMARY, 0x05, b"\x40\x1f\x1f\x2c"),
+    (PRIMARY, 0x06, b"\x6f\x1f\x16\x25"),
+    (PRIMARY, 0x08, b"\x6f\x1f\x1f\x22"),
+    (PRIMARY, 0x13, b"\x00\x04"),
+    (PRIMARY, 0x30, b"\x02"),
+    (PRIMARY, 0x41, b"\x00"),
+    (PRIMARY, 0x50, b"\x3f"),
+    (PRIMARY, 0x60, b"\x02\x00"),
+    (PRIMARY, 0x61, b"\x03\x20\x01\xe0"),
+    (PRIMARY, 0x82, b"\x1e"),
+    (PRIMARY, 0x84, b"\x01"),
+    (PRIMARY, 0x86, b"\x00"),
+    (PRIMARY, 0xE3, b"\x2f"),
+    (PRIMARY, 0xE0, b"\x00"),
+    (PRIMARY, 0xE6, b"\x00"),
+)
+
+# What sets one glass apart from another. `cs` lists the controllers' select
+# pins, PRIMARY first: each takes an equal run of the payload. `reset` is the
+# reset pulse's low and high time in ms, and `ready_after_reset` whether BUSY
+# goes high after it: the ED2208 keeps it low until its setup is in. `ccset`
+# is CCSET's data before each controller's pixels, or None for none, and `drf`
+# the refresh command's data. `scale` and `margin` size the notice text, since
+# the built-in font is only 8 px.
+Layout = namedtuple(
+    "Layout",
+    ("name", "cs", "init", "reset", "ready_after_reset", "ccset", "drf", "scale", "margin"),
+)
+
+# The glass is picked by the size the config names: OTA replaces main.py but
+# never config.py, so the program cannot ask for anything older configs lack.
+LAYOUTS = {
+    # 100/100 ms reset. Seeed uses 20/20 ms. CCSET before each controller's
+    # DTM, unlike the Seeed driver. Both among the changes made at once.
+    (1200, 1600): Layout(
+        name='13.3"',
+        cs=(CS0, CS1),
+        init=T133A01_INIT,
+        reset=(100, 100),
+        ready_after_reset=True,
+        ccset=b"\x01",
+        drf=b"\x01",
+        scale=4,
+        margin=96,
+    ),
+    (800, 480): Layout(
+        name='7.3"',
+        cs=(CS0,),
+        init=ED2208_INIT,
+        reset=(20, 10),
+        ready_after_reset=False,
+        ccset=None,
+        drf=b"\x00",
+        scale=3,
+        margin=48,
+    ),
+}
+LAYOUT = LAYOUTS[(WIDTH, HEIGHT)]
 
 
 class Problem(Exception):
@@ -321,7 +393,8 @@ def fetch(etag: str):
         if status == 404:
             raise Problem(
                 'The frame is not serving this panel. Enable "External e-ink '
-                'panel" on its admin page, under the "Frame" tab.',
+                'panel" on its admin page, under the "Frame" tab, and set '
+                f'"External panel size" to {LAYOUT.name}.',
                 lasting=True,
             )
         if status == 503:
@@ -490,21 +563,25 @@ def wrap(text: str, width: int) -> list:
 def notice(message: str) -> bytearray:
     """A page, packed like /frame.e6's, saying `message` the glass's own way up."""
     pixels = bytearray(WIDTH * HEIGHT // 2)
-    half = len(pixels) // 2
+    count = len(LAYOUT.cs)
+    part = len(pixels) // count
     view = memoryview(pixels)
-    # Both GS4_HMSB framebuffers view this payload, one packed 4-bit half per controller.
-    halves = [
-        framebuf.FrameBuffer(view[i * half : (i + 1) * half], WIDTH // 2, HEIGHT, framebuf.GS4_HMSB)
-        for i in (0, 1)
+    # GS4_HMSB framebuffers view this payload, one packed 4-bit part per controller.
+    parts = [
+        framebuf.FrameBuffer(
+            view[i * part : (i + 1) * part], WIDTH // count, HEIGHT, framebuf.GS4_HMSB
+        )
+        for i in range(count)
     ]
-    for glass in halves:
+    for glass in parts:
         glass.fill(WHITE)
 
+    scale, margin = LAYOUT.scale, LAYOUT.margin
     glyph = framebuf.FrameBuffer(bytearray(8), 8, 8, framebuf.MONO_HLSB)
-    # Rasterize one built-in 8x8 glyph at a time; SCALE enlarges its set pixels below.
-    across = WIDTH - 2 * MARGIN
+    # Rasterize one built-in 8x8 glyph at a time; scale enlarges its set pixels below.
+    across = WIDTH - 2 * margin
 
-    for row, line in enumerate(wrap(f"Fugleramme: {message}", across // (8 * SCALE))):
+    for row, line in enumerate(wrap(f"Fugleramme: {message}", across // (8 * scale))):
         for col, char in enumerate(line):
             glyph.fill(0)
             glyph.text(char, 0, 0, 1)
@@ -512,11 +589,11 @@ def notice(message: str) -> bytearray:
                 for gx in range(8):
                     if not glyph.pixel(gx, gy):
                         continue
-                    x = MARGIN + (col * 8 + gx) * SCALE
-                    y = MARGIN + (row * 10 + gy) * SCALE
-                    # Both halves get each box; FrameBuffer clips to its own bounds.
-                    for i, glass in enumerate(halves):
-                        glass.fill_rect(x - i * WIDTH // 2, y, SCALE, SCALE, BLACK)
+                    x = margin + (col * 8 + gx) * scale
+                    y = margin + (row * 10 + gy) * scale
+                    # Every part gets each box; FrameBuffer clips to its own bounds.
+                    for i, glass in enumerate(parts):
+                        glass.fill_rect(x - i * WIDTH // count, y, scale, scale, BLACK)
     return pixels
 
 
@@ -533,7 +610,7 @@ class Panel:
 
     def __init__(self):
         # Release the hold off() left through the previous deep sleep.
-        for num in (RST, DC, CS0, CS1, SCK, MOSI):
+        for num in (RST, DC) + LAYOUT.cs + (SCK, MOSI):
             machine.Pin(num, hold=False)
         # Drive the load switch high without releasing it first. A brief cut
         # of an energised panel has broken refreshes here.
@@ -546,17 +623,16 @@ class Panel:
             sck=machine.Pin(SCK),
             mosi=machine.Pin(MOSI),
         )
-        self.cs = {
-            PRIMARY: machine.Pin(CS0, machine.Pin.OUT, value=1),
-            SECONDARY: machine.Pin(CS1, machine.Pin.OUT, value=1),
-        }
+        self.cs = tuple(
+            (1 << i, machine.Pin(num, machine.Pin.OUT, value=1)) for i, num in enumerate(LAYOUT.cs)
+        )
         self.dc = machine.Pin(DC, machine.Pin.OUT, value=0)
         self.rst = machine.Pin(RST, machine.Pin.OUT, value=1)
         self.busy = machine.Pin(BUSY, machine.Pin.IN)
 
     def command(self, target: int, command: int, data=b"") -> None:
         # Shared SPI carries commands and data; CS selects controllers and DC distinguishes the two.
-        chips = [pin for chip, pin in self.cs.items() if target & chip]
+        chips = [pin for chip, pin in self.cs if target & chip]
         for pin in chips:
             pin.value(0)
         self.dc.value(0)
@@ -570,14 +646,15 @@ class Panel:
 
     def command_rows(self, target: int, command: int, data) -> None:
         """Send a DTM in row-sized chunks, unlike the Seeed driver."""
-        chips = [pin for chip, pin in self.cs.items() if target & chip]
+        chips = [pin for chip, pin in self.cs if target & chip]
         for pin in chips:
             pin.value(0)
         self.dc.value(0)
         self.spi.write(bytes([command]))
         self.dc.value(1)
         view = memoryview(data)
-        stride = (WIDTH // 4) * 64  # 64 rows of 300 bytes
+        # 64 rows of one controller's part, e.g. 300 bytes each on the 13.3".
+        stride = (WIDTH // 2 // len(self.cs)) * 64
         for offset in range(0, len(view), stride):
             self.spi.write(view[offset : offset + stride])
             time.sleep_ms(1)
@@ -601,20 +678,17 @@ class Panel:
     def on(self) -> None:
         # POWER is already high; give it the settle a cold power-on got.
         time.sleep_ms(100)
-        # 100/100 ms reset. Seeed uses 20/20 ms. One of the changes made at once.
+        low, high = LAYOUT.reset
         self.rst.value(0)
-        time.sleep_ms(100)
+        time.sleep_ms(low)
         self.rst.value(1)
-        time.sleep_ms(100)
-        self.wait(5)
-        for target, command, data in INIT:
+        time.sleep_ms(high)
+        if LAYOUT.ready_after_reset:
+            self.wait(5)
+        for target, command, data in LAYOUT.init:
             self.command(target, command, data)
             time.sleep_ms(10)
-        # PLL: absent from the Seeed init. One of the changes added at once.
-        # Whether it matters on its own is not known.
-        self.command(BOTH, 0x30, b"\x08")
-        time.sleep_ms(10)
-        # PON before any pixel data, unlike the Seeed driver. One of the
+        # PON before any pixel data, unlike Seeed's T133A01 driver. One of the
         # changes not tested in isolation.
         self.command(BOTH, 0x04)
         self.wait(5)
@@ -640,17 +714,17 @@ class Panel:
             raise RefreshProblem(f"panel released BUSY after only {busy_ms} ms")
 
     def draw(self, pixels) -> None:
-        half = len(pixels) // 2
+        part = len(pixels) // len(self.cs)
         view = memoryview(pixels)
-        # CCSET before each controller's DTM, unlike the Seeed driver. One of
-        # the changes added together, not tested in isolation.
-        for target, chunk in ((PRIMARY, view[:half]), (SECONDARY, view[half:])):
-            self.command(BOTH, 0xE0, b"\x01")
-            self.wait(5)
-            time.sleep_ms(10)
+        for i, (target, _) in enumerate(self.cs):
+            chunk = view[i * part : (i + 1) * part]
+            if LAYOUT.ccset is not None:
+                self.command(BOTH, 0xE0, LAYOUT.ccset)
+                self.wait(5)
+                time.sleep_ms(10)
             self.command_rows(target, 0x10, chunk)
         time.sleep_ms(30)
-        self.command(BOTH, 0x12, b"\x01")
+        self.command(BOTH, 0x12, LAYOUT.drf)
         self.refresh()
 
     def off(self) -> None:
@@ -671,7 +745,7 @@ class Panel:
                 self.spi.deinit()
             except (AttributeError, OSError):
                 pass
-            for num in (RST, DC, CS0, CS1, SCK, MOSI):
+            for num in (RST, DC) + LAYOUT.cs + (SCK, MOSI):
                 machine.Pin(num, machine.Pin.OUT, value=0, hold=True)
             machine.Pin(BUSY, machine.Pin.IN)
             esp32.gpio_deep_sleep_hold(True)
