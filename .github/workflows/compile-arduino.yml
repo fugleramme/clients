@@ -1,9 +1,14 @@
 name: Build and Compile Sketch
 
 on:
-  - push
-  - pull_request
-  - workflow_dispatch
+  push:
+    paths:
+      - 'xiao-arduino/**'
+  pull_request:
+    paths:
+      - 'xiao-arduino/**'
+  workflow_dispatch:
+  
 jobs:
   build:
     runs-on: ubuntu-latest
