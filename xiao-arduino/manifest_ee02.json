@@ -1,0 +1,11 @@
+{
+  "name": "Fugleramme for Seeed Xiao EE02",
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        { "path": "build_output/BOARD_EE02/fugleramme-esp32.ino.merged.bin", "offset": 0 },
+      ]
+    }
+  ]
+}
