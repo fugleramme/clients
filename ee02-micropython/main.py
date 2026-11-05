@@ -52,6 +52,7 @@ import socket
 import ssl
 import struct
 import time
+from collections import namedtuple
 
 import config
 import esp32
@@ -81,7 +82,6 @@ HEIGHT = config.HEIGHT
 # followed by the right-controller rows.
 HEADER = "<4sHBBHHII"
 BLACK, WHITE = 0, 1
-SCALE, MARGIN = 4, 96  # the built-in font is 8 px, far too small at this size
 
 # T133A01 BUSY is active-low: LOW while refreshing, HIGH when idle. A healthy
 # full refresh stays busy for about 28 s, or about 47 s on a cold panel. Treat
@@ -123,11 +123,12 @@ FRESH = {
 SCK, MOSI = 7, 9  # XIAO D8, D10
 CS0, CS1, DC, RST, BUSY, POWER = 44, 41, 10, 38, 4, 43
 
-# Controller-select bit flags for the shared SPI bus.
+# Controller-select bit flags for the shared SPI bus. BOTH reaches every
+# controller a glass has.
 PRIMARY, SECONDARY, BOTH = 1, 2, 3
 
 # Each row is (controller target, register command, command data), in hardware init order.
-INIT = (
+T133A01_INIT = (
     (PRIMARY, 0x74, b"\x00\x0c\x0c\xd9\xdd\xdd\x15\x15\x55"),
     (BOTH, 0xF0, b"\x49\x55\x13\x5d\x05\x10"),
     (BOTH, 0x00, b"\xdf\x69"),
@@ -144,7 +145,22 @@ INIT = (
     (PRIMARY, 0x05, b"\xe0\x20"),
     (PRIMARY, 0xB0, b"\x01"),
     (PRIMARY, 0xB1, b"\x02"),
+    # PLL: absent from the Seeed init. One of the changes added at once.
+    # Whether it matters on its own is not known.
+    (BOTH, 0x30, b"\x08"),
 )
+
+# What sets one glass apart from another. `cs` lists the controllers' select
+# pins, PRIMARY first: each takes an equal run of the payload. `scale` and
+# `margin` size the notice text, since the built-in font is only 8 px.
+Layout = namedtuple("Layout", ("cs", "init", "scale", "margin"))
+
+# The glass is picked by the size the config names: OTA replaces main.py but
+# never config.py, so the program cannot ask for anything older configs lack.
+LAYOUTS = {
+    (1200, 1600): Layout(cs=(CS0, CS1), init=T133A01_INIT, scale=4, margin=96),
+}
+LAYOUT = LAYOUTS[(WIDTH, HEIGHT)]
 
 
 class Problem(Exception):
@@ -490,21 +506,25 @@ def wrap(text: str, width: int) -> list:
 def notice(message: str) -> bytearray:
     """A page, packed like /frame.e6's, saying `message` the glass's own way up."""
     pixels = bytearray(WIDTH * HEIGHT // 2)
-    half = len(pixels) // 2
+    count = len(LAYOUT.cs)
+    part = len(pixels) // count
     view = memoryview(pixels)
-    # Both GS4_HMSB framebuffers view this payload, one packed 4-bit half per controller.
-    halves = [
-        framebuf.FrameBuffer(view[i * half : (i + 1) * half], WIDTH // 2, HEIGHT, framebuf.GS4_HMSB)
-        for i in (0, 1)
+    # GS4_HMSB framebuffers view this payload, one packed 4-bit part per controller.
+    parts = [
+        framebuf.FrameBuffer(
+            view[i * part : (i + 1) * part], WIDTH // count, HEIGHT, framebuf.GS4_HMSB
+        )
+        for i in range(count)
     ]
-    for glass in halves:
+    for glass in parts:
         glass.fill(WHITE)
 
+    scale, margin = LAYOUT.scale, LAYOUT.margin
     glyph = framebuf.FrameBuffer(bytearray(8), 8, 8, framebuf.MONO_HLSB)
-    # Rasterize one built-in 8x8 glyph at a time; SCALE enlarges its set pixels below.
-    across = WIDTH - 2 * MARGIN
+    # Rasterize one built-in 8x8 glyph at a time; scale enlarges its set pixels below.
+    across = WIDTH - 2 * margin
 
-    for row, line in enumerate(wrap(f"Fugleramme: {message}", across // (8 * SCALE))):
+    for row, line in enumerate(wrap(f"Fugleramme: {message}", across // (8 * scale))):
         for col, char in enumerate(line):
             glyph.fill(0)
             glyph.text(char, 0, 0, 1)
@@ -512,11 +532,11 @@ def notice(message: str) -> bytearray:
                 for gx in range(8):
                     if not glyph.pixel(gx, gy):
                         continue
-                    x = MARGIN + (col * 8 + gx) * SCALE
-                    y = MARGIN + (row * 10 + gy) * SCALE
-                    # Both halves get each box; FrameBuffer clips to its own bounds.
-                    for i, glass in enumerate(halves):
-                        glass.fill_rect(x - i * WIDTH // 2, y, SCALE, SCALE, BLACK)
+                    x = margin + (col * 8 + gx) * scale
+                    y = margin + (row * 10 + gy) * scale
+                    # Every part gets each box; FrameBuffer clips to its own bounds.
+                    for i, glass in enumerate(parts):
+                        glass.fill_rect(x - i * WIDTH // count, y, scale, scale, BLACK)
     return pixels
 
 
@@ -533,7 +553,7 @@ class Panel:
 
     def __init__(self):
         # Release the hold off() left through the previous deep sleep.
-        for num in (RST, DC, CS0, CS1, SCK, MOSI):
+        for num in (RST, DC) + LAYOUT.cs + (SCK, MOSI):
             machine.Pin(num, hold=False)
         # Drive the load switch high without releasing it first. A brief cut
         # of an energised panel has broken refreshes here.
@@ -546,17 +566,16 @@ class Panel:
             sck=machine.Pin(SCK),
             mosi=machine.Pin(MOSI),
         )
-        self.cs = {
-            PRIMARY: machine.Pin(CS0, machine.Pin.OUT, value=1),
-            SECONDARY: machine.Pin(CS1, machine.Pin.OUT, value=1),
-        }
+        self.cs = tuple(
+            (1 << i, machine.Pin(num, machine.Pin.OUT, value=1)) for i, num in enumerate(LAYOUT.cs)
+        )
         self.dc = machine.Pin(DC, machine.Pin.OUT, value=0)
         self.rst = machine.Pin(RST, machine.Pin.OUT, value=1)
         self.busy = machine.Pin(BUSY, machine.Pin.IN)
 
     def command(self, target: int, command: int, data=b"") -> None:
         # Shared SPI carries commands and data; CS selects controllers and DC distinguishes the two.
-        chips = [pin for chip, pin in self.cs.items() if target & chip]
+        chips = [pin for chip, pin in self.cs if target & chip]
         for pin in chips:
             pin.value(0)
         self.dc.value(0)
@@ -570,14 +589,15 @@ class Panel:
 
     def command_rows(self, target: int, command: int, data) -> None:
         """Send a DTM in row-sized chunks, unlike the Seeed driver."""
-        chips = [pin for chip, pin in self.cs.items() if target & chip]
+        chips = [pin for chip, pin in self.cs if target & chip]
         for pin in chips:
             pin.value(0)
         self.dc.value(0)
         self.spi.write(bytes([command]))
         self.dc.value(1)
         view = memoryview(data)
-        stride = (WIDTH // 4) * 64  # 64 rows of 300 bytes
+        # 64 rows of one controller's part, e.g. 300 bytes each on the 13.3".
+        stride = (WIDTH // 2 // len(self.cs)) * 64
         for offset in range(0, len(view), stride):
             self.spi.write(view[offset : offset + stride])
             time.sleep_ms(1)
@@ -607,13 +627,9 @@ class Panel:
         self.rst.value(1)
         time.sleep_ms(100)
         self.wait(5)
-        for target, command, data in INIT:
+        for target, command, data in LAYOUT.init:
             self.command(target, command, data)
             time.sleep_ms(10)
-        # PLL: absent from the Seeed init. One of the changes added at once.
-        # Whether it matters on its own is not known.
-        self.command(BOTH, 0x30, b"\x08")
-        time.sleep_ms(10)
         # PON before any pixel data, unlike the Seeed driver. One of the
         # changes not tested in isolation.
         self.command(BOTH, 0x04)
@@ -640,11 +656,12 @@ class Panel:
             raise RefreshProblem(f"panel released BUSY after only {busy_ms} ms")
 
     def draw(self, pixels) -> None:
-        half = len(pixels) // 2
+        part = len(pixels) // len(self.cs)
         view = memoryview(pixels)
         # CCSET before each controller's DTM, unlike the Seeed driver. One of
         # the changes added together, not tested in isolation.
-        for target, chunk in ((PRIMARY, view[:half]), (SECONDARY, view[half:])):
+        for i, (target, _) in enumerate(self.cs):
+            chunk = view[i * part : (i + 1) * part]
             self.command(BOTH, 0xE0, b"\x01")
             self.wait(5)
             time.sleep_ms(10)
@@ -671,7 +688,7 @@ class Panel:
                 self.spi.deinit()
             except (AttributeError, OSError):
                 pass
-            for num in (RST, DC, CS0, CS1, SCK, MOSI):
+            for num in (RST, DC) + LAYOUT.cs + (SCK, MOSI):
                 machine.Pin(num, machine.Pin.OUT, value=0, hold=True)
             machine.Pin(BUSY, machine.Pin.IN)
             esp32.gpio_deep_sleep_hold(True)
