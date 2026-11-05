@@ -7,9 +7,9 @@ Want an all-in-one build or want no custom hardware? Use a [Pi with an Inky Impr
 | Board | Screen | Program | Owners |
 | --- | --- | --- | --- |
 | Adafruit Feather ESP32-C6 | 13.3" e-ink (Inky Impression) | [`feather-esp32c6-arduino`](feather-esp32c6-arduino/) | @naxhh |
-| XIAO EE02 | 13.3" e-ink | [`ee02-micropython`](ee02-micropython/) | @lorenzschmid, @kamaradclimber |
+| XIAO EE02 | 13.3" e-ink | [`xiao-micropython`](xiao-micropython/) | @lorenzschmid, @kamaradclimber |
 | XIAO EE02 or EE04 | 13.3" or 7.3" e-ink | [`xiao-arduino`](xiao-arduino/) | @brgerig |
-| XIAO EE04 | 7.3" e-ink | [`ee04-micropython`](ee04-micropython/) | @tcole333 |
+| XIAO EE04 | 7.3" e-ink | [`xiao-micropython`](xiao-micropython/) | @lorenzschmid, @kamaradclimber |
 
 Got Fugleramme running on a device that isn't listed? Add your program and share it with the community - see [CONTRIBUTING.md](CONTRIBUTING.md).
 
