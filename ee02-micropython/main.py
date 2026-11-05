@@ -1,8 +1,9 @@
-"""Fugleramme's page on a Seeed 13.3" Spectra 6 panel, from a XIAO EE02 board.
+"""Fugleramme's page on a Seeed Spectra 6 panel: the 13.3" from a XIAO EE02
+board, or the 7.3" from a XIAO EE04. config.py's WIDTH and HEIGHT pick which.
 
-MicroPython's SEEED_XIAO_ESP32S3 build (it needs the board's octal PSRAM),
-copied to the board as main.py. Enable "External e-ink panel" on the frame's admin page
-first. Every wake it asks the frame for /frame.e6 with the ETag of the last
+MicroPython's SEEED_XIAO_ESP32S3 build (the 13.3" needs the board's octal
+PSRAM), copied to the board as main.py. Enable "External e-ink panel" on the
+frame's admin page and set "External panel size" to the panel's first. Every wake it asks the frame for /frame.e6 with the ETag of the last
 frame page on the glass (or none if a notice replaced it); an unchanged page
 costs a 304 and nothing else. A new one is downloaded whole, checked, and only
 then sent to the panel. The frame may be served over HTTPS, which the port
@@ -36,12 +37,12 @@ cannot join, steady on while the panel refreshes (~30 s), and three short if
 that refresh failed.
 
 The file format is in Fugleramme's docs
-(https://arnegiacomo.dev/fugleramme/screens/#e6-file-format). The panel's
-command sequence is inspired by Seeed_GFX2's Driver_T133A01.cpp
-(https://github.com/Seeed-Studio/Seeed_GFX2, MIT License, see its LICENSE).
-Several changes were made at once to recover a corrupted panel. They seem
-to fix the failures seen here. They were not bisected, so which change
-matters is not known.
+(https://arnegiacomo.dev/fugleramme/screens/#e6-file-format). The panels'
+command sequences come from Seeed_GFX2's Driver_T133A01.cpp and
+Driver_ED2208.cpp (https://github.com/Seeed-Studio/Seeed_GFX2, MIT License,
+see its LICENSE). The 13.3"'s is only inspired by it: several changes were
+made at once to recover a corrupted panel. They seem to fix the failures seen
+here. They were not bisected, so which change matters is not known.
 GPIO 43 and 44 double as UART0, so use the USB REPL.
 """
 
@@ -83,9 +84,10 @@ HEIGHT = config.HEIGHT
 HEADER = "<4sHBBHHII"
 BLACK, WHITE = 0, 1
 
-# T133A01 BUSY is active-low: LOW while refreshing, HIGH when idle. A healthy
-# full refresh stays busy for about 28 s, or about 47 s on a cold panel. Treat
-# a missing or very short BUSY-low as a refresh that never started.
+# T133A01 and ED2208 BUSY is active-low: LOW while refreshing, HIGH when idle.
+# A healthy 13.3" full refresh stays busy for about 28 s, or about 47 s on a
+# cold panel. Treat a missing or very short BUSY-low as a refresh that never
+# started.
 REFRESH_START_MS = 2_000
 REFRESH_MIN_BUSY_MS = 10_000
 REFRESH_TIMEOUT_MS = 60_000
@@ -119,7 +121,8 @@ FRESH = {
     "ota_failures": 0,
 }
 
-# EE02 wiring, from Seeed_GFX2's XIAO_ePaper_Board_Configs.h.
+# EE02 and EE04 wiring, from Seeed_GFX2's XIAO_ePaper_Board_Configs.h. Only the
+# EE02 has CS1, for the 13.3"'s second controller.
 SCK, MOSI = 7, 9  # XIAO D8, D10
 CS0, CS1, DC, RST, BUSY, POWER = 44, 41, 10, 38, 4, 43
 
@@ -150,15 +153,68 @@ T133A01_INIT = (
     (BOTH, 0x30, b"\x08"),
 )
 
+# The 7.3"'s single controller, as Seeed's driver sets it up.
+ED2208_INIT = (
+    (PRIMARY, 0xAA, b"\x49\x55\x20\x08\x09\x18"),
+    (PRIMARY, 0x01, b"\x3f\x00\x32\x2a\x0e\x2a"),
+    (PRIMARY, 0x00, b"\x5f\x69"),
+    (PRIMARY, 0x03, b"\x00\x54\x00\x44"),
+    (PRIMARY, 0x05, b"\x40\x1f\x1f\x2c"),
+    (PRIMARY, 0x06, b"\x6f\x1f\x16\x25"),
+    (PRIMARY, 0x08, b"\x6f\x1f\x1f\x22"),
+    (PRIMARY, 0x13, b"\x00\x04"),
+    (PRIMARY, 0x30, b"\x02"),
+    (PRIMARY, 0x41, b"\x00"),
+    (PRIMARY, 0x50, b"\x3f"),
+    (PRIMARY, 0x60, b"\x02\x00"),
+    (PRIMARY, 0x61, b"\x03\x20\x01\xe0"),
+    (PRIMARY, 0x82, b"\x1e"),
+    (PRIMARY, 0x84, b"\x01"),
+    (PRIMARY, 0x86, b"\x00"),
+    (PRIMARY, 0xE3, b"\x2f"),
+    (PRIMARY, 0xE0, b"\x00"),
+    (PRIMARY, 0xE6, b"\x00"),
+)
+
 # What sets one glass apart from another. `cs` lists the controllers' select
-# pins, PRIMARY first: each takes an equal run of the payload. `scale` and
-# `margin` size the notice text, since the built-in font is only 8 px.
-Layout = namedtuple("Layout", ("cs", "init", "scale", "margin"))
+# pins, PRIMARY first: each takes an equal run of the payload. `reset` is the
+# reset pulse's low and high time in ms, and `ready_after_reset` whether BUSY
+# goes high after it: the ED2208 keeps it low until its setup is in. `ccset`
+# is CCSET's data before each controller's pixels, or None for none, and `drf`
+# the refresh command's data. `scale` and `margin` size the notice text, since
+# the built-in font is only 8 px.
+Layout = namedtuple(
+    "Layout",
+    ("name", "cs", "init", "reset", "ready_after_reset", "ccset", "drf", "scale", "margin"),
+)
 
 # The glass is picked by the size the config names: OTA replaces main.py but
 # never config.py, so the program cannot ask for anything older configs lack.
 LAYOUTS = {
-    (1200, 1600): Layout(cs=(CS0, CS1), init=T133A01_INIT, scale=4, margin=96),
+    # 100/100 ms reset. Seeed uses 20/20 ms. CCSET before each controller's
+    # DTM, unlike the Seeed driver. Both among the changes made at once.
+    (1200, 1600): Layout(
+        name='13.3"',
+        cs=(CS0, CS1),
+        init=T133A01_INIT,
+        reset=(100, 100),
+        ready_after_reset=True,
+        ccset=b"\x01",
+        drf=b"\x01",
+        scale=4,
+        margin=96,
+    ),
+    (800, 480): Layout(
+        name='7.3"',
+        cs=(CS0,),
+        init=ED2208_INIT,
+        reset=(20, 10),
+        ready_after_reset=False,
+        ccset=None,
+        drf=b"\x00",
+        scale=3,
+        margin=48,
+    ),
 }
 LAYOUT = LAYOUTS[(WIDTH, HEIGHT)]
 
@@ -337,7 +393,8 @@ def fetch(etag: str):
         if status == 404:
             raise Problem(
                 'The frame is not serving this panel. Enable "External e-ink '
-                'panel" on its admin page, under the "Frame" tab.',
+                'panel" on its admin page, under the "Frame" tab, and set '
+                f'"External panel size" to {LAYOUT.name}.',
                 lasting=True,
             )
         if status == 503:
@@ -621,16 +678,17 @@ class Panel:
     def on(self) -> None:
         # POWER is already high; give it the settle a cold power-on got.
         time.sleep_ms(100)
-        # 100/100 ms reset. Seeed uses 20/20 ms. One of the changes made at once.
+        low, high = LAYOUT.reset
         self.rst.value(0)
-        time.sleep_ms(100)
+        time.sleep_ms(low)
         self.rst.value(1)
-        time.sleep_ms(100)
-        self.wait(5)
+        time.sleep_ms(high)
+        if LAYOUT.ready_after_reset:
+            self.wait(5)
         for target, command, data in LAYOUT.init:
             self.command(target, command, data)
             time.sleep_ms(10)
-        # PON before any pixel data, unlike the Seeed driver. One of the
+        # PON before any pixel data, unlike Seeed's T133A01 driver. One of the
         # changes not tested in isolation.
         self.command(BOTH, 0x04)
         self.wait(5)
@@ -658,16 +716,15 @@ class Panel:
     def draw(self, pixels) -> None:
         part = len(pixels) // len(self.cs)
         view = memoryview(pixels)
-        # CCSET before each controller's DTM, unlike the Seeed driver. One of
-        # the changes added together, not tested in isolation.
         for i, (target, _) in enumerate(self.cs):
             chunk = view[i * part : (i + 1) * part]
-            self.command(BOTH, 0xE0, b"\x01")
-            self.wait(5)
-            time.sleep_ms(10)
+            if LAYOUT.ccset is not None:
+                self.command(BOTH, 0xE0, LAYOUT.ccset)
+                self.wait(5)
+                time.sleep_ms(10)
             self.command_rows(target, 0x10, chunk)
         time.sleep_ms(30)
-        self.command(BOTH, 0x12, b"\x01")
+        self.command(BOTH, 0x12, LAYOUT.drf)
         self.refresh()
 
     def off(self) -> None:

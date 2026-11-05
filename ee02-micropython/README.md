@@ -9,6 +9,8 @@ Contributed by [Lorenz Schmid](https://github.com/lorenzschmid) and extended by 
 - [XIAO EE02](https://www.seeedstudio.com/XIAO-ePaper-Display-Board-ESP32-S3-EE02-p-6639.html)
 - [Seeed Studio 13.3" Spectra 6 panel](https://www.seeedstudio.com/13-3inch-Six-Color-eInk-ePaper-Display-with-1200x1600-Pixels-p-6569.html)
 
+The same program drives a 7.3" panel from a XIAO EE04, picked by `WIDTH` and `HEIGHT` in `config.py`. See [`ee04-micropython`](../ee04-micropython/).
+
 ## Install and configure
 
 On Fugleramme's admin page, enable **External e-ink panel** under **Frame** and set **External panel size** to 13.3". Then:
