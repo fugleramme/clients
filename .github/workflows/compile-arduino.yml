@@ -14,7 +14,8 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Pinned until compile-sketches supports 26.04: https://github.com/arduino/compile-sketches/issues/598
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         board: [BOARD_EE02, BOARD_EE04]
