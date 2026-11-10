@@ -265,6 +265,8 @@ float readBatteryVoltage() {
     pinMode(ADC_EN, OUTPUT);
     digitalWrite(ADC_EN, HIGH);
 
+    delay(15);
+
     uint32_t sum = 0;
     for(int i = 0; i < 16; i++) {
         sum += analogReadMilliVolts(BATTERY_ADC);
