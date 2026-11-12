@@ -24,8 +24,8 @@ using fs::FS;
 
 enum powerMode{ SLEEP, WARN, FULL };
 
-RTC_DATA_ATTR String Etag;
-RTC_DATA_ATTR powerMode lastMode;
+RTC_DATA_ATTR char Etag[33] = "";
+RTC_DATA_ATTR powerMode lastMode = FULL;
 
 Preferences prefs;
 bool paramsChanged = false;
@@ -126,7 +126,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
       break;
   }
 
-  String NewEtag = http.header("Etag");
+  String newEtag = http.header("Etag");
 
   NetworkClient& sock = http.getStream();
   Header header = {};
@@ -148,7 +148,8 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
           Serial.println("Checksum error!");
         } else if(convertBuffer(pixels, header.length, header.width)) {
           Serial.println("We got a frame!");
-          Etag = NewEtag;
+          if (newEtag.length() < sizeof(Etag)) strlcpy(Etag, newEtag.c_str(), sizeof(Etag));
+          else Etag[0] = 0;   // too long to store: never send a truncated ETag
           epaper.setRotation(0);
           epaper.pushImage(0, 0, header.width, header.height, (uint16_t *)pixels);
           epaper.setRotation(1);
@@ -173,7 +174,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
 }
 
 void displaySetupInfo(WiFiManager *wifi) {
-  Etag = "";
+  Etag[0] = 0;
   int qr_width = 0;
   size_t qr_bytes = 0;
   
@@ -450,7 +451,7 @@ void setup() {
 
     if(configPortal){
       //prefs.putString("Etag","");
-      Etag = "";
+      Etag[0] = 0;
       
       wm.startWebPortal();
       displaySetupInfo(&wm);
@@ -483,12 +484,14 @@ void setup() {
     if (pendingButton)
       press_button(pendingButton);
 
-    if(forceUpdate)
-      Etag = "";
+    //if(forceUpdate)
+    //  Etag = "";
     //else
     //  Etag = prefs.getString("Etag","");
 
-    need_refresh = getFrame(Etag, battery, sleepMin);
+    String oldEtag = forceUpdate ? String("") : String(Etag);
+
+    need_refresh = getFrame(oldEtag, battery, sleepMin);
 
     if(currentMode < FULL)
       drawLowBattery(TFT_RED);
