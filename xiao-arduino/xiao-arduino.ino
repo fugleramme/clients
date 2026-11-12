@@ -14,6 +14,8 @@ using fs::FS;
 
 #define LOW_BATTERY_WIFI 3.3
 #define LOW_BATTERY_WARNING 3.5
+#define BATTERY_HYSTERESIS 0.1
+
 
 #define LOW_BATTERY_SLEEP_MINUTES ((uint8_t)60)
 #define MIN_SLEEP_MINUTES ((uint8_t)5)
@@ -30,6 +32,8 @@ bool useSSL = false;
 bool forceUpdate = false;
 bool configPortal = false;
 bool configReset = false;
+char pendingButton = 0;
+WiFiClientSecure *client;
 String APPass;
 
 EPaper epaper;
@@ -57,6 +61,14 @@ void displayError(String message, bool persistent = false) {
   Serial.println(message);
 }
 
+void goToSleep(uint8_t minutes) {
+  uint64_t button_mask = ((1ULL << KEY0) | (1ULL << KEY1) | (1ULL << KEY2));
+
+  esp_sleep_enable_ext1_wakeup(button_mask, ESP_EXT1_WAKEUP_ANY_LOW);
+  esp_sleep_enable_timer_wakeup(minutes * 60 * uS_TO_S_FACTOR);
+  esp_deep_sleep_start();
+}
+
 bool getFrame(String oldEtag, float battery, uint8_t &poll) {
   HTTPClient http;
 
@@ -68,8 +80,6 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
   String URL = frameHost + ":" + framePort + "/frame.e6?battery=" + String(battery, 2);
 
   if(useSSL) {
-    WiFiClientSecure *client = new WiFiClientSecure;
-    client->setInsecure();
     http.begin(*client, "https://" + URL);
   } else {
     http.begin("http://" + URL);
@@ -79,6 +89,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
     http.addHeader("If-None-Match",oldEtag);
   }
 
+  http.setTimeout(15000);
   int httpResponseCode = http.GET();
 
   switch(httpResponseCode) {
@@ -105,7 +116,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
       // Go on to display
       break;
     default:
-      displayError("The frame answered with HTTP code " + httpResponseCode);
+      displayError("The frame answered with HTTP code " + String(httpResponseCode));
       http.end();
       poll = 0;
       return false;
@@ -115,31 +126,33 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
   String Etag = http.header("Etag");
 
   NetworkClient& sock = http.getStream();
-  Header header;
+  Header header = {};
   char magic[] = {'E','6','F','1'};
 
-  if (sock.readBytes((uint8_t*)&header, sizeof(Header))) {
+  if(sock.readBytes((uint8_t*)&header, sizeof(Header)) == sizeof(Header)) {
     if(memcmp(header.magic, magic, 4) == 0 && header.version == 1 && header.encoding == 1) {
       Serial.print("Valid page received, length ");
       Serial.println(header.length);
       if(header.width == 1200 && header.height == 1600 && header.width * header.height / 2 == header.length) {
         Serial.println("Page is the correct size");
         uint8_t* pixels = (uint8_t*)ps_malloc(header.length);
-        sock.readBytes(pixels, header.length);
 
-        if(CRC32::calculate(pixels, header.length) != header.crc) {
+        if(!pixels) {
+          displayError("Out of memory");
+        } else if(sock.readBytes(pixels, header.length) != header.length) {
+          // Short read: nothing to do
+        } else if(CRC32::calculate(pixels, header.length) != header.crc) {
           Serial.println("Checksum error!");
-        } else {
+        } else if(convertBuffer(pixels, header.length, header.width)) {
           Serial.println("We got a frame!");
-          prefs.putString("Etag",Etag);
-          convertBuffer(pixels,header.length,header.width);
-          Serial.println("Attempting to write:");
+          prefs.putString("Etag", Etag);
           epaper.setRotation(0);
           epaper.pushImage(0, 0, header.width, header.height, (uint16_t *)pixels);
           epaper.setRotation(1);
           refresh = true;
         }
-        free(pixels);
+
+        free(pixels);  // free(NULL) is harmless
       } else {
         Serial.println("Wrong page size.");
       }
@@ -147,7 +160,9 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
       Serial.println("Magic doesn't match.");
     }
   }
+
   sock.stop();
+  if(client) client->stop();
   http.end();
 
   poll = header.poll;
@@ -155,6 +170,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
 }
 
 void displaySetupInfo(WiFiManager *wifi) {
+  prefs.putString("Etag", "");
   int qr_width = 0;
   size_t qr_bytes = 0;
   
@@ -206,6 +222,28 @@ void displaySetupInfo(WiFiManager *wifi) {
   free(portalQR);
 }
 
+void press_button(char button) {
+  frameHost = prefs.getString("frameHost", "fugleramme.local");
+  framePort = prefs.getString("framePort", "8080");
+  useSSL = prefs.getBool("useSSL", false);
+  HTTPClient http;
+
+  String URL = frameHost + ":" + framePort + "/press";
+
+  if(useSSL) {
+    http.begin(*client, "https://" + URL);
+  } else {
+    http.begin("http://" + URL);
+  }
+
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  int httpResponseCode = http.POST("button=" + String(button));
+  http.end();
+  if(httpResponseCode == 204)
+    delay(5000); // Give frame server time to render new frame
+  else
+    goToSleep(MIN_SLEEP_MINUTES);
+}
 
 void handle_wakeup() {
   esp_sleep_wakeup_cause_t wakeup_reason;
@@ -215,12 +253,17 @@ void handle_wakeup() {
   switch (wakeup_reason) {
     case ESP_SLEEP_WAKEUP_EXT1:
       {
+        pinMode(KEY0, INPUT_PULLUP);
+        pinMode(KEY1, INPUT_PULLUP);
+        pinMode(KEY2, INPUT_PULLUP);
+
         uint64_t wakeup_pin_mask = esp_sleep_get_ext1_wakeup_status();
         if (wakeup_pin_mask & (1ULL << KEY0)) {
           Serial.println("Wakeup caused by Button 1");
           configReset = true;
           for(int i = 0; i < 10; i++) {
-            if(digitalRead(KEY2) == HIGH) {
+            if(digitalRead(KEY0) == HIGH) {
+              pendingButton = 'C';
               configReset = false;
               break;
             }
@@ -232,6 +275,7 @@ void handle_wakeup() {
           configPortal = true;
           for(int i = 0; i < 5; i++) {
             if(digitalRead(KEY1) == HIGH) {
+              pendingButton = 'B';
               configPortal = false;
               break;
             }
@@ -240,7 +284,7 @@ void handle_wakeup() {
         }          
         if (wakeup_pin_mask & (1ULL << KEY2)) {
           Serial.println("Wakeup caused by Button 3");
-          forceUpdate = true;
+          pendingButton = 'A';
         }
         break;
       }
@@ -249,6 +293,7 @@ void handle_wakeup() {
       break;
     default:
       Serial.printf("Wakeup was not caused by deep sleep: %d\n", wakeup_reason);
+      forceUpdate = true;
       break;
   }
 }
@@ -274,6 +319,17 @@ float readBatteryVoltage() {
     }
     digitalWrite(ADC_EN, LOW);
     return sum * VOLTAGE_DIVIDER_RATIO / 16 / 1000.0;
+}
+
+powerMode modeForVoltage(float v, powerMode last) {
+  // Going up requires clearing the threshold by the margin.
+  // Staying put or going down uses the plain threshold.
+  float warnAt = LOW_BATTERY_WARNING + (last < FULL ? BATTERY_HYSTERESIS : 0);
+  float wifiAt = LOW_BATTERY_WIFI    + (last == SLEEP ? BATTERY_HYSTERESIS : 0);
+
+  if (v >= warnAt) return FULL;
+  if (v >= wifiAt) return WARN;
+  return SLEEP;
 }
 
 void drawLowBattery(uint32_t color) {
@@ -322,48 +378,37 @@ String generateRandomPassword() {
 
 void setup() {
   Serial.begin(115200);
-  delay(2000);
-  Serial.println("13.3\" Bird frame");
+  delay(3000);
   
+  prefs.begin("BirdFrame");
+
   handle_wakeup();
 
   epaper.begin();
   epaper.setRotation(1);
   epaper.sleep();
 
-  prefs.begin("BirdFrame");
-
-  uint8_t sleep = MIN_SLEEP_MINUTES;
+  uint8_t sleepMin = MIN_SLEEP_MINUTES;
   float battery = readBatteryVoltage();
-  powerMode currentMode;
   powerMode lastMode = static_cast<powerMode>(prefs.getUChar("powerMode",static_cast<uint8_t>(FULL)));
+  powerMode currentMode = modeForVoltage(battery, lastMode);
 
-  if(battery >= LOW_BATTERY_WARNING)
-    currentMode = FULL;
-  else if(battery >= LOW_BATTERY_WIFI)
-    currentMode = WARN;
-  else
-    currentMode = SLEEP;
-
-  // Force one last fetch before entering low-power mode
-  if(lastMode != SLEEP && currentMode == SLEEP)
-    forceUpdate = true;
+  // Force a fetch before drawing a status icon
+  if (currentMode != lastMode) forceUpdate = true;
 
   Serial.printf("Battery voltage is %.2f\n",battery);
 
   String Etag;
 
-  if(forceUpdate)
-    Etag = "";
-  else
-    Etag = prefs.getString("Etag","");
-
+  bool need_refresh = false;
+    
   // Skip all the processing and go back to sleep if we've been below Wifi threshold twice in a row
   if(!(currentMode == SLEEP && lastMode == SLEEP)) {
     WiFiManager wm;
     
     if(configReset) {
       wm.resetSettings();
+      prefs.clear();
     } else {
       frameHost = prefs.getString("frameHost", "fugleramme.local");
       framePort = prefs.getString("framePort", "8080");
@@ -372,40 +417,45 @@ void setup() {
 
     WiFiManagerParameter fuglerammeHost("frameHost", "Fugleramme Host", frameHost.c_str(), 128);
     WiFiManagerParameter fuglerammePort("framePort", "Fugleramme Port", framePort.c_str(), 5);
-    WiFiManagerParameter SSL("useSSL", "USE HTTPS", "F", 2, "type=\"checkbox\" value=\"F\"");
-    
-    wm.setAPCallback(displaySetupInfo);
-    wm.setSaveParamsCallback(saveParams);
-    wm.addParameter(&fuglerammeHost);
-    wm.addParameter(&fuglerammePort);
-    wm.addParameter(&SSL);
-
-    APPass = generateRandomPassword();
-
-    if(!wm.autoConnect("Fugleramme Setup",APPass.c_str())) {
-      delay(3000);
-      ESP.restart();
-      delay(5000);
-    }
-
-    if(configPortal){
-      wm.setCustomHeadElement(
+    const char* checkBoxHtml = useSSL ? "type=\"checkbox\" checked" : "type=\"checkbox\"";
+    WiFiManagerParameter SSL("useSSL", "USE HTTPS", "F", 2, checkBoxHtml);
+    wm.setCustomHeadElement(
         "<script>"
         "document.addEventListener('DOMContentLoaded', function() {"
         "  var buttons = document.getElementsByTagName('button');"
         "  for (var i = 0; i < buttons.length; i++) {"
         "    if (buttons[i].textContent === 'Configure WiFi') {"
-        "      buttons[i].textContent = 'Configure Settings';" // Your new text here
+        "      buttons[i].textContent = 'Configure Settings';"
         "    }"
         "  }"
         "});"
         "</script>"
       );
+    wm.setAPCallback(displaySetupInfo);
+    wm.setSaveParamsCallback(saveParams);
+    wm.setConnectTimeout(20);
+    wm.setConfigPortalTimeout(300);
+    wm.addParameter(&fuglerammeHost);
+    wm.addParameter(&fuglerammePort);
+    wm.addParameter(&SSL);
+    //wm.setEnableConfigPortal(configPortal || !wm.getWiFiIsSaved());
+
+    APPass = generateRandomPassword();
+
+    if(!wm.autoConnect("Fugleramme Setup",APPass.c_str())) {
+      powerMode toSave = (currentMode != lastMode && !need_refresh) ? lastMode : currentMode;
+      prefs.putUChar("powerMode", static_cast<uint8_t>(toSave));
+      goToSleep(currentMode < FULL ? LOW_BATTERY_SLEEP_MINUTES : MIN_SLEEP_MINUTES);
+    }
+
+    if(configPortal){
+      prefs.putString("Etag","");
+      
       wm.startWebPortal();
       displaySetupInfo(&wm);
-      while(configPortal){
-        wm.process();
-      }
+      uint32_t deadline = millis() + 5UL * 60 * 1000;
+      while (configPortal && millis() < deadline) { wm.process(); delay(1); }
+      wm.stopWebPortal();
     }
 
     if(paramsChanged) {
@@ -424,8 +474,20 @@ void setup() {
 
     Serial.println("Loaded frame host " + frameHost + ":" + framePort);
 
-    bool need_refresh;
-    need_refresh = getFrame(Etag, battery, sleep);
+    if(useSSL) {
+      client = new WiFiClientSecure;
+      client->setInsecure();
+    }
+
+    if (pendingButton)
+      press_button(pendingButton);
+
+    if(forceUpdate)
+      Etag = "";
+    else
+      Etag = prefs.getString("Etag","");
+
+    need_refresh = getFrame(Etag, battery, sleepMin);
 
     if(currentMode < FULL)
       drawLowBattery(TFT_RED);
@@ -439,19 +501,16 @@ void setup() {
     }
   }
 
-  prefs.putUChar("powerMode",static_cast<uint8_t>(currentMode));
+  powerMode toSave = (currentMode != lastMode && !need_refresh) ? lastMode : currentMode;
+  prefs.putUChar("powerMode", static_cast<uint8_t>(toSave));
 
   uint8_t sleepTime;
   if(currentMode < FULL)
     sleepTime = LOW_BATTERY_SLEEP_MINUTES;
   else
-    sleepTime = max(sleep,MIN_SLEEP_MINUTES);
+    sleepTime = max(sleepMin,MIN_SLEEP_MINUTES);
 
-  uint64_t button_mask = ((1ULL << KEY0) | (1ULL << KEY1) | (1ULL << KEY2));
-
-  esp_sleep_enable_ext1_wakeup(button_mask, ESP_EXT1_WAKEUP_ANY_LOW);
-  esp_sleep_enable_timer_wakeup(sleepTime * 60 * uS_TO_S_FACTOR);
-  esp_deep_sleep_start();
+  goToSleep(sleepTime);
 }
 
 void loop() {
