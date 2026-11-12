@@ -12,6 +12,20 @@ using fs::FS;
 #include "driver.h"
 #include <TFT_eSPI.h>
 
+//#define DEBUG
+
+#ifdef DEBUG
+  #define DEBUG_BEGIN(x)   Serial.begin(x)
+  #define DEBUG_PRINT(x)   Serial.print(x)
+  #define DEBUG_PRINTLN(x) Serial.println(x)
+  #define DEBUG_PRINTF(...) Serial.printf(__VA_ARGS__)
+#else
+  #define DEBUG_BEGIN(x)
+  #define DEBUG_PRINT(x)
+  #define DEBUG_PRINTLN(x)
+  #define DEBUG_PRINTF(...)
+#endif
+
 #define LOW_BATTERY_WIFI 3.3
 #define LOW_BATTERY_WARNING 3.5
 #define BATTERY_HYSTERESIS 0.1
@@ -61,7 +75,7 @@ struct __attribute__((__packed__)) Header {
 
 void displayError(String message, bool persistent = false) {
   // Not yet implemented, just print the error
-  Serial.println(message);
+  DEBUG_PRINTLN(message);
 }
 
 void goToSleep(uint8_t minutes) {
@@ -98,7 +112,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
   switch(httpResponseCode) {
     case 304:
       // No change to display
-      Serial.println("No change to frame.");
+      DEBUG_PRINTLN("No change to frame.");
       http.end();
       poll = 0;
       return false;
@@ -134,10 +148,10 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
 
   if(sock.readBytes((uint8_t*)&header, sizeof(Header)) == sizeof(Header)) {
     if(memcmp(header.magic, magic, 4) == 0 && header.version == 1 && header.encoding == 1) {
-      Serial.print("Valid page received, length ");
-      Serial.println(header.length);
+      DEBUG_PRINT("Valid page received, length ");
+      DEBUG_PRINTLN(header.length);
       if(header.width == 1200 && header.height == 1600 && header.width * header.height / 2 == header.length) {
-        Serial.println("Page is the correct size");
+        DEBUG_PRINTLN("Page is the correct size");
         uint8_t* pixels = (uint8_t*)ps_malloc(header.length);
 
         if(!pixels) {
@@ -145,9 +159,9 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
         } else if(sock.readBytes(pixels, header.length) != header.length) {
           // Short read: nothing to do
         } else if(CRC32::calculate(pixels, header.length) != header.crc) {
-          Serial.println("Checksum error!");
+          DEBUG_PRINTLN("Checksum error!");
         } else if(convertBuffer(pixels, header.length, header.width)) {
-          Serial.println("We got a frame!");
+          DEBUG_PRINTLN("We got a frame!");
           if (newEtag.length() < sizeof(Etag)) strlcpy(Etag, newEtag.c_str(), sizeof(Etag));
           else Etag[0] = 0;   // too long to store: never send a truncated ETag
           epaper.setRotation(0);
@@ -158,10 +172,10 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
 
         free(pixels);  // free(NULL) is harmless
       } else {
-        Serial.println("Wrong page size.");
+        DEBUG_PRINTLN("Wrong page size.");
       }
     } else {
-      Serial.println("Magic doesn't match.");
+      DEBUG_PRINTLN("Magic doesn't match.");
     }
   }
 
@@ -263,7 +277,7 @@ void handle_wakeup() {
 
         uint64_t wakeup_pin_mask = esp_sleep_get_ext1_wakeup_status();
         if (wakeup_pin_mask & (1ULL << KEY0)) {
-          Serial.println("Wakeup caused by Button 1");
+          DEBUG_PRINTLN("Wakeup caused by Button 1");
           configReset = true;
           for(int i = 0; i < 10; i++) {
             if(digitalRead(KEY0) == HIGH) {
@@ -275,7 +289,7 @@ void handle_wakeup() {
           }
         }
         if (wakeup_pin_mask & (1ULL << KEY1)) {
-          Serial.println("Wakeup caused by Button 2");
+          DEBUG_PRINTLN("Wakeup caused by Button 2");
           configPortal = true;
           for(int i = 0; i < 5; i++) {
             if(digitalRead(KEY1) == HIGH) {
@@ -287,16 +301,16 @@ void handle_wakeup() {
           }
         }          
         if (wakeup_pin_mask & (1ULL << KEY2)) {
-          Serial.println("Wakeup caused by Button 3");
+          DEBUG_PRINTLN("Wakeup caused by Button 3");
           pendingButton = 'A';
         }
         break;
       }
     case ESP_SLEEP_WAKEUP_TIMER:
-      Serial.println("Wakeup caused by timer");
+      DEBUG_PRINTLN("Wakeup caused by timer");
       break;
     default:
-      Serial.printf("Wakeup was not caused by deep sleep: %d\n", wakeup_reason);
+      DEBUG_PRINTF("Wakeup was not caused by deep sleep: %d\n", wakeup_reason);
       forceUpdate = true;
       break;
   }
@@ -381,9 +395,13 @@ String generateRandomPassword() {
 }
 
 void setup() {
-  Serial.begin(115200);
-  delay(3000);
-  
+  DEBUG_BEGIN(115200);
+  #ifdef DEBUG
+    while (!Serial) {
+      ;  // wait for serial port to connect. Needed for native USB port only
+    }
+  #endif
+
   prefs.begin("BirdFrame");
 
   handle_wakeup();
@@ -394,13 +412,12 @@ void setup() {
 
   uint8_t sleepMin = MIN_SLEEP_MINUTES;
   float battery = readBatteryVoltage();
-  //powerMode lastMode = static_cast<powerMode>(prefs.getUChar("powerMode",static_cast<uint8_t>(FULL)));
   powerMode currentMode = modeForVoltage(battery, lastMode);
 
   // Force a fetch before drawing a status icon
   if (currentMode != lastMode) forceUpdate = true;
 
-  Serial.printf("Battery voltage is %.2f\n",battery);
+  DEBUG_PRINTF("Battery voltage is %.2f\n",battery);
 
   bool need_refresh = false;
     
@@ -411,6 +428,7 @@ void setup() {
     if(configReset) {
       wm.resetSettings();
       prefs.clear();
+      Etag[0] = 0;
     } else {
       frameHost = prefs.getString("frameHost", "fugleramme.local");
       framePort = prefs.getString("framePort", "8080");
@@ -445,12 +463,10 @@ void setup() {
     APPass = generateRandomPassword();
 
     if(!wm.autoConnect("Fugleramme Setup",APPass.c_str())) {
-      lastMode = (currentMode != lastMode && !need_refresh) ? lastMode : currentMode;
       goToSleep(currentMode < FULL ? LOW_BATTERY_SLEEP_MINUTES : MIN_SLEEP_MINUTES);
     }
 
     if(configPortal){
-      //prefs.putString("Etag","");
       Etag[0] = 0;
       
       wm.startWebPortal();
@@ -474,7 +490,7 @@ void setup() {
       useSSL = prefs.getBool("useSSL", false);
     }
 
-    Serial.println("Loaded frame host " + frameHost + ":" + framePort);
+    DEBUG_PRINTLN("Loaded frame host " + frameHost + ":" + framePort);
 
     if(useSSL) {
       client = new WiFiClientSecure;
@@ -483,11 +499,6 @@ void setup() {
 
     if (pendingButton)
       press_button(pendingButton);
-
-    //if(forceUpdate)
-    //  Etag = "";
-    //else
-    //  Etag = prefs.getString("Etag","");
 
     String oldEtag = forceUpdate ? String("") : String(Etag);
 
