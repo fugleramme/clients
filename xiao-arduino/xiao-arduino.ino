@@ -86,6 +86,27 @@ void goToSleep(uint8_t minutes) {
   esp_deep_sleep_start();
 }
 
+// Reads exactly len bytes. Over TLS, read() returns -1 while nothing is
+// decrypted yet, so that alone must not end the read.
+// Thanks to https://github.com/delta0815 for the fix!
+static bool readFully(NetworkClient &s, uint8_t *buf, size_t len, uint32_t timeoutMs = 10000) {
+  size_t got = 0;
+  uint32_t last = millis();
+  while (got < len) {
+    int n = s.read(buf + got, len - got);
+    if (n > 0) {
+      got += n;
+      last = millis();
+    } else if ((!s.connected() && s.available() <= 0) || millis() - last > timeoutMs) {
+      DEBUG_PRINTF("Short read: %u of %u bytes\n", (unsigned)got, (unsigned)len);
+      return false;
+    } else {
+      delay(2);
+    }
+  }
+  return true;
+}
+
 bool getFrame(String oldEtag, float battery, uint8_t &poll) {
   HTTPClient http;
 
@@ -133,7 +154,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
       // Go on to display
       break;
     default:
-      displayError("The frame answered with HTTP code " + String(httpResponseCode));
+      displayError(String("The frame answered with HTTP code ") + httpResponseCode);
       http.end();
       poll = 0;
       return false;
@@ -146,7 +167,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
   Header header = {};
   char magic[] = {'E','6','F','1'};
 
-  if(sock.readBytes((uint8_t*)&header, sizeof(Header)) == sizeof(Header)) {
+  if(readFully(sock, (uint8_t*)&header, sizeof(Header))) {
     if(memcmp(header.magic, magic, 4) == 0 && header.version == 1 && header.encoding == 1) {
       DEBUG_PRINT("Valid page received, length ");
       DEBUG_PRINTLN(header.length);
@@ -156,7 +177,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
 
         if(!pixels) {
           displayError("Out of memory");
-        } else if(sock.readBytes(pixels, header.length) != header.length) {
+        } else if(!readFully(sock, pixels, header.length)) {
           // Short read: nothing to do
         } else if(CRC32::calculate(pixels, header.length) != header.crc) {
           DEBUG_PRINTLN("Checksum error!");
@@ -255,7 +276,7 @@ void press_button(char button) {
   }
 
   http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-  int httpResponseCode = http.POST("button=" + String(button));
+  int httpResponseCode = http.POST(String("button=") + button);
   http.end();
   if(httpResponseCode == 204)
     delay(5000); // Give frame server time to render new frame
