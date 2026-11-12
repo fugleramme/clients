@@ -24,6 +24,9 @@ using fs::FS;
 
 enum powerMode{ SLEEP, WARN, FULL };
 
+RTC_DATA_ATTR String Etag;
+RTC_DATA_ATTR powerMode lastMode;
+
 Preferences prefs;
 bool paramsChanged = false;
 String frameHost = "fugleramme.local";
@@ -123,7 +126,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
       break;
   }
 
-  String Etag = http.header("Etag");
+  String NewEtag = http.header("Etag");
 
   NetworkClient& sock = http.getStream();
   Header header = {};
@@ -145,7 +148,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
           Serial.println("Checksum error!");
         } else if(convertBuffer(pixels, header.length, header.width)) {
           Serial.println("We got a frame!");
-          prefs.putString("Etag", Etag);
+          Etag = NewEtag;
           epaper.setRotation(0);
           epaper.pushImage(0, 0, header.width, header.height, (uint16_t *)pixels);
           epaper.setRotation(1);
@@ -170,7 +173,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
 }
 
 void displaySetupInfo(WiFiManager *wifi) {
-  prefs.putString("Etag", "");
+  Etag = "";
   int qr_width = 0;
   size_t qr_bytes = 0;
   
@@ -390,15 +393,13 @@ void setup() {
 
   uint8_t sleepMin = MIN_SLEEP_MINUTES;
   float battery = readBatteryVoltage();
-  powerMode lastMode = static_cast<powerMode>(prefs.getUChar("powerMode",static_cast<uint8_t>(FULL)));
+  //powerMode lastMode = static_cast<powerMode>(prefs.getUChar("powerMode",static_cast<uint8_t>(FULL)));
   powerMode currentMode = modeForVoltage(battery, lastMode);
 
   // Force a fetch before drawing a status icon
   if (currentMode != lastMode) forceUpdate = true;
 
   Serial.printf("Battery voltage is %.2f\n",battery);
-
-  String Etag;
 
   bool need_refresh = false;
     
@@ -443,13 +444,13 @@ void setup() {
     APPass = generateRandomPassword();
 
     if(!wm.autoConnect("Fugleramme Setup",APPass.c_str())) {
-      powerMode toSave = (currentMode != lastMode && !need_refresh) ? lastMode : currentMode;
-      prefs.putUChar("powerMode", static_cast<uint8_t>(toSave));
+      lastMode = (currentMode != lastMode && !need_refresh) ? lastMode : currentMode;
       goToSleep(currentMode < FULL ? LOW_BATTERY_SLEEP_MINUTES : MIN_SLEEP_MINUTES);
     }
 
     if(configPortal){
-      prefs.putString("Etag","");
+      //prefs.putString("Etag","");
+      Etag = "";
       
       wm.startWebPortal();
       displaySetupInfo(&wm);
@@ -484,8 +485,8 @@ void setup() {
 
     if(forceUpdate)
       Etag = "";
-    else
-      Etag = prefs.getString("Etag","");
+    //else
+    //  Etag = prefs.getString("Etag","");
 
     need_refresh = getFrame(Etag, battery, sleepMin);
 
@@ -501,9 +502,8 @@ void setup() {
     }
   }
 
-  powerMode toSave = (currentMode != lastMode && !need_refresh) ? lastMode : currentMode;
-  prefs.putUChar("powerMode", static_cast<uint8_t>(toSave));
-
+  lastMode = (currentMode != lastMode && !need_refresh) ? lastMode : currentMode;
+  
   uint8_t sleepTime;
   if(currentMode < FULL)
     sleepTime = LOW_BATTERY_SLEEP_MINUTES;
