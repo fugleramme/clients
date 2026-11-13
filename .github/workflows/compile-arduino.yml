@@ -65,7 +65,7 @@ jobs:
           name: ${{ matrix.board }}
           path: xiao-arduino/build_output/${{ matrix.board }}/*.bin
           if-no-files-found: error
-          
+
   # Publishes the web flasher with the fresh binaries, for builds of main only
   deploy:
     needs: build
