@@ -14,6 +14,7 @@ On Fugleramme's admin page, enable **External e-ink panel** under **Frame** and 
 
 1. Visit the [web-based Fugleramme flasher](https://fugleramme.github.io/clients/) in Chrome\*, select your board, connect it to your computer, and click "Connect".
 2. The frame will reboot and start a configuration web portal. Follow the on-display instructions to complete setup.
+
 **\*Important:** The web flasher only supports Chromium-based browsers like Chrome, Edge, and Opera
 
 ## Update
