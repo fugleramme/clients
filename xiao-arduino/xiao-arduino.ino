@@ -38,7 +38,7 @@ using fs::FS;
 
 enum powerMode{ SLEEP, WARN, FULL };
 
-RTC_DATA_ATTR char Etag[33] = "";
+RTC_DATA_ATTR char Etag[40] = "";
 RTC_DATA_ATTR powerMode lastMode = FULL;
 
 Preferences prefs;
@@ -98,7 +98,7 @@ static bool readFully(NetworkClient &s, uint8_t *buf, size_t len, uint32_t timeo
       got += n;
       last = millis();
     } else if ((!s.connected() && s.available() <= 0) || millis() - last > timeoutMs) {
-      DEBUG_PRINTF("Short read: %u of %u bytes\n", (unsigned)got, (unsigned)len);
+      Serial.printf("Short read: %u of %u bytes\n", (unsigned)got, (unsigned)len);
       return false;
     } else {
       delay(2);
