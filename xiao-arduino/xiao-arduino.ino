@@ -30,6 +30,7 @@ bool useSSL = false;
 bool forceUpdate = false;
 bool configPortal = false;
 bool configReset = false;
+WiFiClientSecure *client;
 String APPass;
 
 EPaper epaper;
@@ -57,6 +58,28 @@ void displayError(String message, bool persistent = false) {
   Serial.println(message);
 }
 
+
+// Reads exactly len bytes. Over TLS, read() returns -1 while nothing is
+// decrypted yet, so that alone must not end the read.
+// Thanks to https://github.com/delta0815 for the fix!
+static bool readFully(NetworkClient &s, uint8_t *buf, size_t len, uint32_t timeoutMs = 10000) {
+  size_t got = 0;
+  uint32_t last = millis();
+  while (got < len) {
+    int n = s.read(buf + got, len - got);
+    if (n > 0) {
+      got += n;
+      last = millis();
+    } else if ((!s.connected() && s.available() <= 0) || millis() - last > timeoutMs) {
+      Serial.printf("Short read: %u of %u bytes\n", (unsigned)got, (unsigned)len);
+      return false;
+    } else {
+      delay(2);
+    }
+  }
+  return true;
+}
+
 bool getFrame(String oldEtag, float battery, uint8_t &poll) {
   HTTPClient http;
 
@@ -68,8 +91,6 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
   String URL = frameHost + ":" + framePort + "/frame.e6?battery=" + String(battery, 2);
 
   if(useSSL) {
-    WiFiClientSecure *client = new WiFiClientSecure;
-    client->setInsecure();
     http.begin(*client, "https://" + URL);
   } else {
     http.begin("http://" + URL);
@@ -79,6 +100,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
     http.addHeader("If-None-Match",oldEtag);
   }
 
+  http.setTimeout(15000);
   int httpResponseCode = http.GET();
 
   switch(httpResponseCode) {
@@ -105,7 +127,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
       // Go on to display
       break;
     default:
-      displayError("The frame answered with HTTP code " + httpResponseCode);
+      displayError(String("The frame answered with HTTP code ") + httpResponseCode);
       http.end();
       poll = 0;
       return false;
@@ -118,28 +140,30 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
   Header header;
   char magic[] = {'E','6','F','1'};
 
-  if (sock.readBytes((uint8_t*)&header, sizeof(Header))) {
+  if(readFully(sock, (uint8_t*)&header, sizeof(Header))) {
     if(memcmp(header.magic, magic, 4) == 0 && header.version == 1 && header.encoding == 1) {
       Serial.print("Valid page received, length ");
       Serial.println(header.length);
       if(header.width == 1200 && header.height == 1600 && header.width * header.height / 2 == header.length) {
         Serial.println("Page is the correct size");
         uint8_t* pixels = (uint8_t*)ps_malloc(header.length);
-        sock.readBytes(pixels, header.length);
 
-        if(CRC32::calculate(pixels, header.length) != header.crc) {
+        if(!pixels) {
+          displayError("Out of memory");
+        } else if(!readFully(sock, pixels, header.length)) {
+          // Short read: nothing to do
+        } else if(CRC32::calculate(pixels, header.length) != header.crc) {
           Serial.println("Checksum error!");
-        } else {
+        } else if(convertBuffer(pixels, header.length, header.width)) {
           Serial.println("We got a frame!");
           prefs.putString("Etag",Etag);
-          convertBuffer(pixels,header.length,header.width);
-          Serial.println("Attempting to write:");
           epaper.setRotation(0);
           epaper.pushImage(0, 0, header.width, header.height, (uint16_t *)pixels);
           epaper.setRotation(1);
           refresh = true;
         }
-        free(pixels);
+
+        free(pixels);  // free(NULL) is harmless
       } else {
         Serial.println("Wrong page size.");
       }
@@ -147,7 +171,9 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
       Serial.println("Magic doesn't match.");
     }
   }
+
   sock.stop();
+  if(client) client->stop();
   http.end();
 
   poll = header.poll;
@@ -423,6 +449,11 @@ void setup() {
     }
 
     Serial.println("Loaded frame host " + frameHost + ":" + framePort);
+
+    if(useSSL) {
+      client = new WiFiClientSecure;
+      client->setInsecure();
+    }
 
     bool need_refresh;
     need_refresh = getFrame(Etag, battery, sleep);
