@@ -4,7 +4,12 @@
     {
       "chipFamily": "ESP32-S3",
       "parts": [
-        { "path": "BOARD_EE02/xiao-arduino.ino.merged.bin", "offset": 0 }
+        {
+          "path": "BOARD_EE02/xiao-arduino.ino.bootloader.bin", "offset": 0x0,
+          "path": "BOARD_EE02/xiao-arduino.ino.partitions.bin", "offset": 0x8000,
+          "path": "BOARD_EE02/boot_app0.bin", "offset": 0xE000,
+          "path": "BOARD_EE02/xiao-arduino.ino.bin", "offset": 0x10000
+        }
       ]
     }
   ]
