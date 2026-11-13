@@ -57,7 +57,11 @@ jobs:
           name: ${{ matrix.board }}
           path: xiao-arduino/build_output/${{ matrix.board }}/*.bin
           if-no-files-found: error
-
+      - name: Copy boot_app0.bin to build output
+        run: |
+          BOOT_APP0=$(find ~/.arduino15/packages/esp32/hardware/esp32 -name "boot_app0.bin" | head -n 1)
+          cp "$BOOT_APP0" xiao-arduino/build_output/${{ matrix.board }}/
+        
   # Publishes the web flasher with the fresh binaries, for builds of main only
   deploy:
     needs: build
