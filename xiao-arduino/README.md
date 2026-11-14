@@ -20,6 +20,7 @@ On Fugleramme's admin page, enable **External e-ink panel** under **Frame** and 
 
 <img width="500" alt="xiao-epaper-display-board-ee02" src="https://github.com/user-attachments/assets/64d5de5c-ae78-42ac-a3ff-acf1ed2c37ed" />
 
+
 ## Update
 
 Option 1: Download the latest [xiao-arduino.ino.bin](https://fugleramme.github.io/clients/BOARD_EE02/xiao-arduino.ino.bin) file for your board. Press and hold the KEY2 button on your display board for 5 seconds. The frame will wake up and start a configuration portal, displaying the URL and QR code on the screen. Once on the portal, click "OTA Update" and update using your downloaded .bin file.
