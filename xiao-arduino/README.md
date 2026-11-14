@@ -27,6 +27,22 @@ Option 1: Download the latest [xiao-arduino.ino.bin](https://fugleramme.github.i
 
 Option 2: Flash the newest firmware directly to the board using the [web-based Fugleramme flasher](https://fugleramme.github.io/clients/). **This will erase your wifi and host settings.**
 
+## Operation
+
+| Button | What it does |
+| --- | --- |
+| RESET | Restart board/force frame redraw |
+| A/KEY3 | Next display mode |
+| B/KEY2 | Show species names on/off |
+| B/KEY2, held for 5 seconds | Open the Wi-Fi setup (see Update above) |
+| C/KEY1 | Rotate the display 90° clockwise |
+| C/KEY1, held for 10 seconds | Reset all settings and launch initial configuration (see Install and configure above) |
+
+These settings are saved on the Fugleramme host and will override any settings set in the admin panel. Give the panel up to a minute to catch up - it redraws slowly.
+
+Note: Admin password is not yet supported. Button presses on the panel will silently fail if an admin password is configured on the host.
+
+
 ## Contributing
 
 This client is designed to support multiple boards and displays. To contribute, update driver.h with the correct output from the [Seeed configuration generator](https://seeed-studio.github.io/Seeed_GFX/)
