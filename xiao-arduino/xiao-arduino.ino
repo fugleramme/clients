@@ -99,7 +99,7 @@ static bool readFully(NetworkClient &s, uint8_t *buf, size_t len, uint32_t timeo
       got += n;
       last = millis();
     } else if ((!s.connected() && s.available() <= 0) || millis() - last > timeoutMs) {
-      Serial.printf("Short read: %u of %u bytes\n", (unsigned)got, (unsigned)len);
+      DEBUG_PRINTF("Short read: %u of %u bytes\n", (unsigned)got, (unsigned)len);
       return false;
     } else {
       delay(2);
@@ -435,7 +435,7 @@ void setup() {
 
   DEBUG_PRINTF("rotation-0  Width: %d, Height: %d\n", epaper.width(), epaper.height());
   epaper.setRotation(1);
-  DEBUG_PRINTF("rotation-0  Width: %d, Height: %d\n", epaper.width(), epaper.height());
+  DEBUG_PRINTF("rotation-1  Width: %d, Height: %d\n", epaper.width(), epaper.height());
   epaper.sleep();
 
   uint8_t sleepMin = MIN_SLEEP_MINUTES;
