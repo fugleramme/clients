@@ -109,27 +109,6 @@ static bool readFully(NetworkClient &s, uint8_t *buf, size_t len, uint32_t timeo
 }
 
 
-// Reads exactly len bytes. Over TLS, read() returns -1 while nothing is
-// decrypted yet, so that alone must not end the read.
-// Thanks to https://github.com/delta0815 for the fix!
-static bool readFully(NetworkClient &s, uint8_t *buf, size_t len, uint32_t timeoutMs = 10000) {
-  size_t got = 0;
-  uint32_t last = millis();
-  while (got < len) {
-    int n = s.read(buf + got, len - got);
-    if (n > 0) {
-      got += n;
-      last = millis();
-    } else if ((!s.connected() && s.available() <= 0) || millis() - last > timeoutMs) {
-      Serial.printf("Short read: %u of %u bytes\n", (unsigned)got, (unsigned)len);
-      return false;
-    } else {
-      delay(2);
-    }
-  }
-  return true;
-}
-
 bool getFrame(String oldEtag, float battery, uint8_t &poll) {
   HTTPClient http;
 
