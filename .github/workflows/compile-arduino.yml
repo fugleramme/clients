@@ -51,11 +51,21 @@ jobs:
             - source-url: https://github.com/Seeed-Studio/Seeed_GFX.git
             - source-url: https://github.com/bakercp/CRC32.git
             - name: WiFiManager
+      - name: Copy boot_app0.bin to build output
+        run: |
+          BOOT_APP0=$(find /tmp/arduino/build-cache/sketches -name "boot_app0.bin" 2>/dev/null | head -n 1)
+          if [ -z "$BOOT_APP0" ]; then
+            BOOT_APP0=$(find / -name "boot_app0.bin" 2>/dev/null | head -n 1)
+          fi
+          echo "Found boot_app0.bin at: $BOOT_APP0"
+          cp "$BOOT_APP0" ${{ github.workspace }}/xiao-arduino/build_output/${{ matrix.board }}/
       - name: Upload Compiled Binaries
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.board }}
-          path: xiao-arduino/build_output/${{ matrix.board }}/*.bin
+          path: |
+            xiao-arduino/build_output/${{ matrix.board }}/*.bin
+            !xiao-arduino/build_output/${{ matrix.board }}/*.merged.bin
           if-no-files-found: error
 
   # Publishes the web flasher with the fresh binaries, for builds of main only
