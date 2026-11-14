@@ -1,3 +1,5 @@
+#pragma once
+
 #include <qrcode.h>
 
 // Reverse a range of bytes: [first, last)
