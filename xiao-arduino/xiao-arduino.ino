@@ -41,18 +41,18 @@ enum powerMode{ SLEEP, WARN, FULL };
 RTC_DATA_ATTR char Etag[40] = "";
 RTC_DATA_ATTR powerMode lastMode = FULL;
 
-Preferences prefs;
-bool paramsChanged = false;
 String frameHost = "fugleramme.local";
 String framePort = "8080";
 bool useSSL = false;
 bool forceUpdate = false;
 bool configPortal = false;
 bool configReset = false;
+bool paramsChanged = false;
 char pendingButton = 0;
+
+Preferences prefs;
 WiFiClientSecure *client;
 String APPass;
-
 EPaper epaper;
 
 #define KEY0  GPIO_NUM_2 // User Button 1
@@ -62,6 +62,7 @@ EPaper epaper;
 #define ADC_EN 6
 #define VOLTAGE_DIVIDER_RATIO 2.0
 
+// Server packs using "<4sHBBHHII"
 struct __attribute__((__packed__)) Header {
     char     magic[4];  // 4s: 4-character string/bytes
     uint16_t version;   // H : 16-bit unsigned integer
@@ -164,6 +165,9 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
   String newEtag = http.header("Etag");
 
   NetworkClient& sock = http.getStream();
+  
+  // Double-check to ensure the Header struct is as expected.
+  static_assert(sizeof(Header) == 20);
   Header header = {};
   char magic[] = {'E','6','F','1'};
 
@@ -428,7 +432,10 @@ void setup() {
   handle_wakeup();
 
   epaper.begin();
+
+  DEBUG_PRINTF("rotation-0  Width: %d, Height: %d\n", epaper.width(), epaper.height());
   epaper.setRotation(1);
+  DEBUG_PRINTF("rotation-0  Width: %d, Height: %d\n", epaper.width(), epaper.height());
   epaper.sleep();
 
   uint8_t sleepMin = MIN_SLEEP_MINUTES;
@@ -524,6 +531,10 @@ void setup() {
     String oldEtag = forceUpdate ? String("") : String(Etag);
 
     need_refresh = getFrame(oldEtag, battery, sleepMin);
+
+    // Network is done: shut the radio down before e-paper update
+    WiFi.disconnect(true);   // true = also turn the radio off
+    WiFi.mode(WIFI_OFF);
 
     if(currentMode < FULL)
       drawLowBattery(TFT_RED);
