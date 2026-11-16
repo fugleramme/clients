@@ -224,7 +224,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
 
         free(pixels);  // free(NULL) is harmless
       } else {
-        return displayError(String("The frame server sent an image of the wrong size. Please set the panel size to 1600 x 1200 on the admin page's \"Frame\" tab."));
+        refresh = displayError(String("The frame server sent an image of the wrong size. Please set the panel size to 1600 x 1200 on the admin page's \"Frame\" tab."));
       }
     } else {
       DEBUG_PRINTLN("Magic doesn't match.");
