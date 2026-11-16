@@ -8,9 +8,9 @@ using fs::FS;
 #include <esp_wifi.h>
 #include <WiFiManager.h>
 #include <WiFiClientSecure.h>
-#include "gutils.h"
 #include "driver.h"
 #include <TFT_eSPI.h>
+#include "gutils.h"
 
 //#define DEBUG
 
@@ -29,7 +29,8 @@ using fs::FS;
 #define LOW_BATTERY_WIFI 3.3
 #define LOW_BATTERY_WARNING 3.5
 #define BATTERY_HYSTERESIS 0.1
-
+#define MAX_RETRIES 3
+#define RETRY_DELAY_MS  5000
 
 #define LOW_BATTERY_SLEEP_MINUTES ((uint8_t)60)
 #define MIN_SLEEP_MINUTES ((uint8_t)5)
@@ -40,6 +41,7 @@ enum powerMode{ SLEEP, WARN, FULL };
 
 RTC_DATA_ATTR char Etag[40] = "";
 RTC_DATA_ATTR powerMode lastMode = FULL;
+RTC_DATA_ATTR uint32_t lastErrorHash = 0;
 
 String frameHost = "fugleramme.local";
 String framePort = "8080";
@@ -48,6 +50,7 @@ bool forceUpdate = false;
 bool configPortal = false;
 bool configReset = false;
 bool paramsChanged = false;
+bool modeChanged = false;
 char pendingButton = 0;
 
 Preferences prefs;
@@ -74,9 +77,25 @@ struct __attribute__((__packed__)) Header {
     uint32_t crc;       // I : 32-bit unsigned integer
 };
 
-void displayError(String message, bool persistent = false) {
-  // Not yet implemented, just print the error
+bool displayError(String message, bool persistent = false) {
   DEBUG_PRINTLN(message);
+
+  Etag[0] = 0;
+  
+  //djb2 hash algorithm
+  uint32_t h = 5381;
+  for (size_t i = 0; i < message.length(); i++) h = h * 33 + (uint8_t)message[i];
+  if (h == lastErrorHash && !modeChanged) return false;   // already on the panel
+  lastErrorHash = h;
+
+  epaper.fillScreen(TFT_WHITE);
+  epaper.setTextColor(TFT_BLACK);
+  epaper.setTextSize(1);
+  epaper.setTextDatum(TC_DATUM);
+  epaper.setFreeFont(&FreeSerif24pt7b);
+  drawWrapped(epaper, message, 800, 500, 1300, 60);
+
+  return true; // We need to refresh  
 }
 
 void goToSleep(uint8_t minutes) {
@@ -114,23 +133,29 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
 
   bool refresh = false;
   const char* headerKeys[] = {"Etag"};
-  size_t headerKeysCount = sizeof(headerKeys) / sizeof(headerKeys[0]);
-  http.collectHeaders(headerKeys, headerKeysCount);
-
+  const size_t headerKeysCount = sizeof(headerKeys) / sizeof(headerKeys[0]);
+  
   String URL = frameHost + ":" + framePort + "/frame.e6?battery=" + String(battery, 2);
 
-  if(useSSL) {
-    http.begin(*client, "https://" + URL);
-  } else {
-    http.begin("http://" + URL);
-  }
+  auto startRequest = [&]() {
+    if (useSSL) http.begin(*client, "https://" + URL);
+    else        http.begin("http://" + URL);
+    http.collectHeaders(headerKeys, headerKeysCount);
+    http.setTimeout(15000);
+    if (oldEtag != "") http.addHeader("If-None-Match", oldEtag);
+  };
 
-  if(oldEtag != "") {
-    http.addHeader("If-None-Match",oldEtag);
-  }
-
-  http.setTimeout(15000);
+  startRequest();
   int httpResponseCode = http.GET();
+
+  for(int attempt = 1; (httpResponseCode == 503 || httpResponseCode < 0) && attempt <= MAX_RETRIES; attempt++) {
+    DEBUG_PRINTF("Error %d, retry %d of %d\n", httpResponseCode, attempt, MAX_RETRIES);
+    http.end();
+    if (client) client->stop();          // clean TLS session on HTTPS
+    delay(RETRY_DELAY_MS);
+    startRequest();
+    httpResponseCode = http.GET();
+  }
 
   switch(httpResponseCode) {
     case 304:
@@ -141,24 +166,24 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
       return false;
       break;
     case 404:
-      displayError("The frame is not configured to serve external panels. Please enable \"External e-ink panel\" at on the admin page's \"Frame\" tab.",true);
       http.end();
       poll = 0;
-      return false;
+      return displayError("The frame server is not configured to serve external panels. Please enable \"External e-ink panel\" on the admin page's \"Frame\" tab.",true);
       break;
     case 503:
-      displayError("The frame has not drawn a page yet.");
       http.end();
       poll = 0;
-      return false;
+      return displayError("The frame server has not drawn a page for quite a while. Please check the state of the server.");
       break;
     case 200:
       // Go on to display
       break;
     default:
-      displayError(String("The frame answered with HTTP code ") + httpResponseCode);
       http.end();
       poll = 0;
+      if (httpResponseCode > 0)
+        return displayError(String("The frame server answered with HTTP code ") + httpResponseCode);
+      DEBUG_PRINTLN("Connection failed");
       return false;
       break;
   }
@@ -181,7 +206,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
         uint8_t* pixels = (uint8_t*)ps_malloc(header.length);
 
         if(!pixels) {
-          displayError("Out of memory");
+          refresh = displayError("Out of memory");
         } else if(!readFully(sock, pixels, header.length)) {
           // Short read: nothing to do
         } else if(CRC32::calculate(pixels, header.length) != header.crc) {
@@ -190,6 +215,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
           DEBUG_PRINTLN("We got a frame!");
           if (newEtag.length() < sizeof(Etag)) strlcpy(Etag, newEtag.c_str(), sizeof(Etag));
           else Etag[0] = 0;   // too long to store: never send a truncated ETag
+          lastErrorHash = 0;
           epaper.setRotation(0);
           epaper.pushImage(0, 0, header.width, header.height, (uint16_t *)pixels);
           epaper.setRotation(1);
@@ -198,7 +224,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
 
         free(pixels);  // free(NULL) is harmless
       } else {
-        DEBUG_PRINTLN("Wrong page size.");
+        refresh = displayError(String("The frame server sent an image of the wrong size. Please set the panel size to 1600 x 1200 on the admin page's \"Frame\" tab."));
       }
     } else {
       DEBUG_PRINTLN("Magic doesn't match.");
@@ -220,10 +246,11 @@ void displaySetupInfo(WiFiManager *wifi) {
   
   String portalIP;
   int portalQRLoc;
-  int portalTextLoc;
+  int portalCenter;
+
+  lastErrorHash = 0;
 
   epaper.fillScreen(TFT_WHITE);
-
   epaper.setTextColor(TFT_BLACK);
   epaper.setTextSize(4);
   epaper.setFreeFont(&FreeSerifItalic24pt7b);
@@ -235,30 +262,24 @@ void displaySetupInfo(WiFiManager *wifi) {
   epaper.drawString("Welcome to Fugleramme, please follow the setup instructions below", 800, 250);
 
   epaper.setFreeFont(&FreeSerif12pt7b);
-  epaper.setTextDatum(TL_DATUM);
-
+  
   if(WiFi.getMode() == WIFI_MODE_AP || WiFi.getMode() == WIFI_MODE_APSTA) {
     portalIP = WiFi.softAPIP().toString();
-    epaper.drawString("To connect to wifi, scan the QR code below", 200, 500);
-    epaper.drawString("or manually connect to the network:", 200, 530);
-    epaper.drawString(wifi->getConfigPortalSSID() + " with password " + APPass, 200, 560);
+    drawWrapped(epaper, "To connect to wifi, scan the QR code below or manually connect to the network: " + wifi->getConfigPortalSSID() + " with password " + APPass, 400, 500, 600, 32);
     uint8_t* wifiQR = generateQRBitmap(("WIFI:S:" + wifi->getConfigPortalSSID() + ";T:WPA;P:" + APPass + ";;").c_str(), 8, 10, qr_width, qr_bytes);
     int wifiQRLoc = (800 - qr_width) / 2;
-    portalQRLoc = 800 + wifiQRLoc;
-    portalTextLoc = 1000;
+    portalCenter = 1200;
     epaper.drawBitmap(wifiQRLoc, 700, wifiQR, qr_width, qr_width, TFT_BLACK);
     free(wifiQR);
   } else {
     portalIP = WiFi.localIP().toString();
-    portalQRLoc = 750 - (qr_width / 2);
-    portalTextLoc = 550;
+    portalCenter = 800;
   }
 
-  epaper.drawString("To configure the frame, scan the QR code below, or visit", portalTextLoc, 500);
-  epaper.drawString("http://" + portalIP, portalTextLoc, 530);
-  epaper.drawString("in your browser and follow the instructions.", portalTextLoc, 560);
+  drawWrapped(epaper, "To configure the frame, scan the QR code below, or visit http://" + portalIP + " in your browser and follow the instructions.", portalCenter, 500, 600, 32);
   
   uint8_t* portalQR = generateQRBitmap(("http://" + portalIP).c_str(), 8, 10, qr_width, qr_bytes);
+  portalQRLoc = portalCenter - (qr_width / 2);
   epaper.drawBitmap(portalQRLoc, 700, portalQR, qr_width, qr_width, TFT_BLACK);
   
   epaper.update();
@@ -348,6 +369,20 @@ void saveParams() {
   forceUpdate = true;
 }
 
+void portalTimeout() {
+  // Only if portal was from autoconnect timeout
+  if(!configPortal) {
+    if(displayError("Setup incomplete, panel is going to sleep. To restart setup, press reset button.")) {
+      WiFi.disconnect(true);   // true = also turn the radio off
+      WiFi.mode(WIFI_OFF);
+      epaper.update();
+      epaper.sleep();
+    }
+    // Sleep forever until restarted
+    esp_deep_sleep_start();
+  }
+}
+
 float readBatteryVoltage() {
     analogReadResolution(12);
     pinMode(BATTERY_ADC, INPUT);
@@ -384,8 +419,8 @@ void drawLowBattery(uint32_t color) {
 }
 
 void drawNoBattery(uint32_t color) {
-    epaper.drawWideLine(1113, 30, 1185, 130, 2, color);
     drawLowBattery(color);
+    epaper.drawWideLine(1113, 30, 1185, 130, 2, color);
 }
 
 void drawNoWifi(uint32_t color) {
@@ -442,9 +477,10 @@ void setup() {
   uint8_t sleepMin = MIN_SLEEP_MINUTES;
   float battery = readBatteryVoltage();
   powerMode currentMode = modeForVoltage(battery, lastMode);
+  modeChanged = (currentMode != lastMode);  
 
   // Force a fetch before drawing a status icon
-  if (currentMode != lastMode) forceUpdate = true;
+  if (modeChanged) forceUpdate = true;
 
   DEBUG_PRINTF("Battery voltage is %.2f\n",battery);
 
@@ -463,6 +499,9 @@ void setup() {
       framePort = prefs.getString("framePort", "8080");
       useSSL = prefs.getBool("useSSL", false);
     }
+  
+    // Initialize WiFi STA mode first so NVS config loads properly
+    WiFi.mode(WIFI_STA);
 
     WiFiManagerParameter fuglerammeHost("frameHost", "Fugleramme Host", frameHost.c_str(), 128);
     WiFiManagerParameter fuglerammePort("framePort", "Fugleramme Port", framePort.c_str(), 5);
@@ -482,16 +521,17 @@ void setup() {
       );
     wm.setAPCallback(displaySetupInfo);
     wm.setSaveParamsCallback(saveParams);
+    wm.setConfigPortalTimeoutCallback(portalTimeout);
     wm.setConnectTimeout(20);
     wm.setConfigPortalTimeout(300);
     wm.addParameter(&fuglerammeHost);
     wm.addParameter(&fuglerammePort);
     wm.addParameter(&SSL);
-    //wm.setEnableConfigPortal(configPortal || !wm.getWiFiIsSaved());
+    wm.setEnableConfigPortal(configPortal || !wm.getWiFiIsSaved());
 
     APPass = generateRandomPassword();
 
-    if(!wm.autoConnect("Fugleramme Setup",APPass.c_str())) {
+    if(!wm.autoConnect("Fugleramme-Setup",APPass.c_str())) {
       goToSleep(currentMode < FULL ? LOW_BATTERY_SLEEP_MINUTES : MIN_SLEEP_MINUTES);
     }
 
@@ -537,12 +577,9 @@ void setup() {
     WiFi.disconnect(true);   // true = also turn the radio off
     WiFi.mode(WIFI_OFF);
 
-    if(currentMode < FULL)
-      drawLowBattery(TFT_RED);
-    
-    if(currentMode == SLEEP)
-      drawNoWifi(TFT_RED);
-    
+    if(currentMode == SLEEP)      drawNoBattery(TFT_RED);
+    else if(currentMode < FULL)   drawLowBattery(TFT_RED);    
+
     if(need_refresh) {
       epaper.update();
       epaper.sleep();
