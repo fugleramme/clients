@@ -174,23 +174,6 @@ static int _qr_scale = 1;
 static uint8_t* _dest_buffer = nullptr;
 static int _qr_width = 0;
 
-/**
- * Sets a specific pixel in a standard monochrome 1-bit array (1 = Black, 0 = White)
- * Matches standard hardware formats where 8 horizontal pixels fit into 1 byte.
- */
-inline void setBitmapPixel(uint8_t* buffer, int x, int y, int total_width, bool is_black) {
-    if (!is_black) return; // Buffer is pre-cleared to 0 (White)
-    
-    int byte_index = (y * ((total_width + 7) / 8)) + (x / 8);
-    int bit_index  = 7 - (x % 8); // MSB-first formatting
-    
-    buffer[byte_index] |= (1 << bit_index);
-}
-
-/**
- * Internal callback required by the Espressif library.
- * Performs the scaling and 90-degree clockwise transformation inline.
- */
 void qr_bitmap_callback(esp_qrcode_handle_t qrcode) {
     int size = esp_qrcode_get_size(qrcode);
     int bytes_per_row = (_qr_width + 7) / 8;
@@ -258,7 +241,7 @@ uint8_t* generateQRBitmap(const char* text, int pixel_scale, int max_version, in
     _dest_buffer = bitmap;
     
     esp_qrcode_config_t active_cfg = {
-        .display_func = qr_bitmap_callback, // Swapped from qr_bitmap_rotate_callback
+        .display_func = qr_bitmap_callback,
         .max_qrcode_version = max_version,
         .qrcode_ecc_level = ESP_QRCODE_ECC_LOW
     };
@@ -269,4 +252,19 @@ uint8_t* generateQRBitmap(const char* text, int pixel_scale, int max_version, in
     }
 
     return bitmap;
+}
+
+static void drawWrapped(EPaper &epaper, const String &text, int cx, int y, int maxW, int lineH) {
+  String line, word;
+  for (size_t i = 0; i <= text.length(); i++) {
+    char c = (i < text.length()) ? text[i] : ' ';
+    if (c != ' ' && c != '\n') { word += c; continue; }
+    String trial = line.length() ? line + " " + word : word;
+    if (line.length() && epaper.textWidth(trial) > maxW) {
+      epaper.drawString(line, cx, y); y += lineH; line = word;
+    } else line = trial;
+    word = "";
+    if (c == '\n') { epaper.drawString(line, cx, y); y += lineH; line = ""; }
+  }
+  if (line.length()) epaper.drawString(line, cx, y);
 }
