@@ -2,6 +2,7 @@
 using fs::FS;
 
 #include <CRC32.h>
+#include <UrlEncode.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <WiFi.h>
@@ -45,6 +46,7 @@ RTC_DATA_ATTR uint32_t lastErrorHash = 0;
 
 String frameHost = "fugleramme.local";
 String framePort = "8080";
+String adminPW = "";
 bool useSSL = false;
 bool forceUpdate = false;
 bool configPortal = false;
@@ -224,7 +226,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
 
         free(pixels);  // free(NULL) is harmless
       } else {
-        return displayError(String("The frame server sent an image of the wrong size. Please set the panel size to 1600 x 1200 on the admin page's \"Frame\" tab."));
+        refresh = displayError(String("The frame server sent an image of the wrong size. Please set the panel size to 1600 x 1200 on the admin page's \"Frame\" tab."));
       }
     } else {
       DEBUG_PRINTLN("Magic doesn't match.");
@@ -291,6 +293,7 @@ void press_button(char button) {
   frameHost = prefs.getString("frameHost", "fugleramme.local");
   framePort = prefs.getString("framePort", "8080");
   useSSL = prefs.getBool("useSSL", false);
+  adminPW = prefs.getString("adminPW","");
   HTTPClient http;
 
   String URL = frameHost + ":" + framePort + "/press";
@@ -302,7 +305,9 @@ void press_button(char button) {
   }
 
   http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-  int httpResponseCode = http.POST(String("button=") + button);
+  String data = String("button=") + button;
+  if(adminPW.length() > 0) data += "&password=" + urlEncode(adminPW);
+  int httpResponseCode = http.POST(data);
   http.end();
   if(httpResponseCode == 204)
     delay(5000); // Give frame server time to render new frame
@@ -498,6 +503,7 @@ void setup() {
       frameHost = prefs.getString("frameHost", "fugleramme.local");
       framePort = prefs.getString("framePort", "8080");
       useSSL = prefs.getBool("useSSL", false);
+      adminPW = prefs.getString("adminPW","");
     }
   
     // Initialize WiFi STA mode first so NVS config loads properly
@@ -507,6 +513,7 @@ void setup() {
     WiFiManagerParameter fuglerammePort("framePort", "Fugleramme Port", framePort.c_str(), 5);
     const char* checkBoxHtml = useSSL ? "type=\"checkbox\" checked" : "type=\"checkbox\"";
     WiFiManagerParameter SSL("useSSL", "USE HTTPS", "F", 2, checkBoxHtml);
+    WiFiManagerParameter fuglerammeAdminPW("adminPW", "Fugleramme Admin Password (Leave blank for no password)", adminPW.c_str(), 128, "type=\"password\"");
     wm.setCustomHeadElement(
         "<script>"
         "document.addEventListener('DOMContentLoaded', function() {"
@@ -527,6 +534,7 @@ void setup() {
     wm.addParameter(&fuglerammeHost);
     wm.addParameter(&fuglerammePort);
     wm.addParameter(&SSL);
+    wm.addParameter(&fuglerammeAdminPW);
     wm.setEnableConfigPortal(configPortal || !wm.getWiFiIsSaved());
 
     APPass = generateRandomPassword();
@@ -549,14 +557,17 @@ void setup() {
       frameHost = fuglerammeHost.getValue();
       framePort = fuglerammePort.getValue();
       useSSL = (String(SSL.getValue()).length() > 0);
+      adminPW = fuglerammeAdminPW.getValue();
 
       prefs.putString("frameHost", frameHost);
       prefs.putString("framePort", framePort);
       prefs.putBool("useSSL", useSSL);
+      prefs.putString("adminPW", adminPW);
     } else {
       frameHost = prefs.getString("frameHost", "fugleramme.local");
       framePort = prefs.getString("framePort", "8080");
       useSSL = prefs.getBool("useSSL", false);
+      adminPW = prefs.getString("adminPW","");
     }
 
     DEBUG_PRINTLN("Loaded frame host " + frameHost + ":" + framePort);
