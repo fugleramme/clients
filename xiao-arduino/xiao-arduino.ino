@@ -347,7 +347,7 @@ void press_button(char button) {
       prepWarning("Incorrect password. Please hold button 2 for 5 seconds to enter setup mode and configure admin password.");
       break;
     case 429:
-      prepWarning("Too many incorrect password attempts. This device has been locked out from button presses.");
+      prepWarning("Too many incorrect password attempts. This device has been locked out from button presses for 15 minutes. Hold button 2 for 5 seconds to enter setup mode and configure admin password.");
       break;
     case 404:
       // This is going to just get handled by the main frame get
@@ -504,6 +504,22 @@ String generateRandomPassword() {
     return password;
 }
 
+String htmlEscape(const String &in) {
+  String out;
+  out.reserve(in.length() + 8);
+  for (size_t i = 0; i < in.length(); i++) {
+    switch (in[i]) {
+      case '&':  out += "&amp;";  break;
+      case '\'': out += "&#39;";  break;
+      case '"':  out += "&quot;"; break;
+      case '<':  out += "&lt;";   break;
+      case '>':  out += "&gt;";   break;
+      default:   out += in[i];
+    }
+  }
+  return out;
+}
+
 void setup() {
   DEBUG_BEGIN(115200);
   #ifdef DEBUG
@@ -553,11 +569,11 @@ void setup() {
     // Initialize WiFi STA mode first so NVS config loads properly
     WiFi.mode(WIFI_STA);
 
-    WiFiManagerParameter fuglerammeHost("frameHost", "Fugleramme Host", frameHost.c_str(), 128);
-    WiFiManagerParameter fuglerammePort("framePort", "Fugleramme Port", framePort.c_str(), 5);
+    WiFiManagerParameter fuglerammeHost("frameHost", "Fugleramme Host", htmlEscape(frameHost).c_str(), 128);
+    WiFiManagerParameter fuglerammePort("framePort", "Fugleramme Port", htmlEscape(framePort).c_str(), 5);
     const char* checkBoxHtml = useSSL ? "type=\"checkbox\" checked" : "type=\"checkbox\"";
     WiFiManagerParameter SSL("useSSL", "Use HTTPS", "F", 2, checkBoxHtml, WFM_LABEL_AFTER);
-    WiFiManagerParameter fuglerammeAdminPW("adminPW", "Fugleramme Admin Password (Leave blank for no password)", adminPW.c_str(), 128, "type=\"password\"");
+    WiFiManagerParameter fuglerammeAdminPW("adminPW", "Fugleramme Admin Password (Leave blank for no password)", htmlEscape(adminPW).c_str(), 128, "type=\"password\"");
     WiFiManagerParameter br("<br/>");
     wm.setCustomHeadElement(
         "<script>"
