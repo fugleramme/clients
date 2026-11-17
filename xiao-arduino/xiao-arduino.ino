@@ -115,9 +115,9 @@ void displayWarning() {
   epaper.setTextSize(1);
   epaper.setTextDatum(TL_DATUM);
   epaper.setFreeFont(&FreeSerif12pt7b);
-  epaper.fillRoundRect(1180, 980, 400, 200, 10, TFT_WHITE);
-  epaper.drawRoundRect(1180, 980, 400, 200, 10, TFT_RED);
-  drawWrapped(epaper, warningMsg, 1200, 1000, 360, 32);
+  epaper.fillRoundRect(1180, 960, 400, 220, 10, TFT_WHITE);
+  epaper.drawRoundRect(1180, 960, 400, 220, 10, TFT_RED);
+  drawWrapped(epaper, warningMsg, 1200, 980, 360, 32);
 
   Etag[0] = 0;
   warning = false;
