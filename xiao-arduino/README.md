@@ -34,13 +34,13 @@ Option 2: Flash the newest firmware directly to the board using the [web-based F
 | RESET | Restart board/force frame redraw |
 | A/KEY3 | Next display mode |
 | B/KEY2 | Show species names on/off |
-| B/KEY2, held for 5 seconds | Open the Wi-Fi setup (see Update above) |
+| B/KEY2, held for 5 seconds | Start the configuration portal (see Update above) |
 | C/KEY1 | Rotate the display 90° clockwise |
 | C/KEY1, held for 10 seconds | Reset all settings and launch initial configuration (see Install and configure above) |
 
 These settings are saved on the Fugleramme host and will override any settings set in the admin panel. Give the panel up to a minute to catch up - it redraws slowly.
 
-Note: Admin password is not yet supported. Button presses on the panel will silently fail if an admin password is configured on the host.
+Note: If an admin password is set on the Fugleramme host, be sure to update the frame's settings with the same password (see Update above).
 
 
 ## Contributing

@@ -2,6 +2,7 @@
 using fs::FS;
 
 #include <CRC32.h>
+#include <UrlEncode.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
 #include <WiFi.h>
@@ -45,12 +46,15 @@ RTC_DATA_ATTR uint32_t lastErrorHash = 0;
 
 String frameHost = "fugleramme.local";
 String framePort = "8080";
+String adminPW = "";
+String warningMsg = "";
 bool useSSL = false;
 bool forceUpdate = false;
 bool configPortal = false;
 bool configReset = false;
 bool paramsChanged = false;
 bool modeChanged = false;
+bool warning = false;
 char pendingButton = 0;
 
 Preferences prefs;
@@ -77,7 +81,7 @@ struct __attribute__((__packed__)) Header {
     uint32_t crc;       // I : 32-bit unsigned integer
 };
 
-bool displayError(String message, bool persistent = false) {
+bool displayError(String message) {
   DEBUG_PRINTLN(message);
 
   Etag[0] = 0;
@@ -89,13 +93,35 @@ bool displayError(String message, bool persistent = false) {
   lastErrorHash = h;
 
   epaper.fillScreen(TFT_WHITE);
-  epaper.setTextColor(TFT_BLACK);
+  epaper.setTextColor(TFT_RED);
   epaper.setTextSize(1);
   epaper.setTextDatum(TC_DATUM);
   epaper.setFreeFont(&FreeSerif24pt7b);
   drawWrapped(epaper, message, 800, 500, 1300, 60);
 
   return true; // We need to refresh  
+}
+
+void prepWarning(String message) {
+  DEBUG_PRINTLN(message);
+
+  Etag[0] = 0;
+  warning = true;
+  warningMsg = message;
+}
+
+void displayWarning() {
+  epaper.setTextColor(TFT_RED);
+  epaper.setTextSize(1);
+  epaper.setTextDatum(TL_DATUM);
+  epaper.setFreeFont(&FreeSerif12pt7b);
+  epaper.fillRoundRect(1180, 960, 400, 220, 10, TFT_WHITE);
+  epaper.drawRoundRect(1180, 960, 400, 220, 10, TFT_RED);
+  drawWrapped(epaper, warningMsg, 1200, 980, 360, 32);
+
+  Etag[0] = 0;
+  warning = false;
+  warningMsg = "";
 }
 
 void goToSleep(uint8_t minutes) {
@@ -168,7 +194,7 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
     case 404:
       http.end();
       poll = 0;
-      return displayError("The frame server is not configured to serve external panels. Please enable \"External e-ink panel\" on the admin page's \"Frame\" tab.",true);
+      return displayError("The frame server is not configured to serve external panels. Please enable \"External e-ink panel\" on the admin page's \"Frame\" tab.");
       break;
     case 503:
       http.end();
@@ -262,6 +288,7 @@ void displaySetupInfo(WiFiManager *wifi) {
   epaper.drawString("Welcome to Fugleramme, please follow the setup instructions below", 800, 250);
 
   epaper.setFreeFont(&FreeSerif12pt7b);
+  epaper.drawString("Portal will timeout after 5 minutes.", 800, 310);
   
   if(WiFi.getMode() == WIFI_MODE_AP || WiFi.getMode() == WIFI_MODE_APSTA) {
     portalIP = WiFi.softAPIP().toString();
@@ -291,6 +318,7 @@ void press_button(char button) {
   frameHost = prefs.getString("frameHost", "fugleramme.local");
   framePort = prefs.getString("framePort", "8080");
   useSSL = prefs.getBool("useSSL", false);
+  adminPW = prefs.getString("adminPW","");
   HTTPClient http;
 
   String URL = frameHost + ":" + framePort + "/press";
@@ -302,12 +330,33 @@ void press_button(char button) {
   }
 
   http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-  int httpResponseCode = http.POST(String("button=") + button);
+  String data = String("button=") + button;
+  if(adminPW.length() > 0) data += "&password=" + urlEncode(adminPW);
+  int httpResponseCode = http.POST(data);
   http.end();
-  if(httpResponseCode == 204)
-    delay(5000); // Give frame server time to render new frame
-  else
-    goToSleep(MIN_SLEEP_MINUTES);
+  switch(httpResponseCode) {
+    case 204:
+      Etag[0] = 0;
+      delay(5000); // Give frame server time to render new frame
+      break;
+    case 400:
+      DEBUG_PRINTF("Unknown button %c\n", button);
+      goToSleep(MIN_SLEEP_MINUTES);
+      break;
+    case 401:
+      prepWarning("Incorrect password. Please hold button 2 for 5 seconds to enter setup mode and configure admin password.");
+      break;
+    case 429:
+      prepWarning("Too many incorrect password attempts. This device has been locked out from button presses for 15 minutes. Hold button 2 for 5 seconds to enter setup mode and configure admin password.");
+      break;
+    case 404:
+      // This is going to just get handled by the main frame get
+      break;
+    default:
+      DEBUG_PRINTF("Unknown response from panel: %d\n", httpResponseCode);
+      goToSleep(MIN_SLEEP_MINUTES);
+      break;
+  }
 }
 
 void handle_wakeup() {
@@ -455,6 +504,22 @@ String generateRandomPassword() {
     return password;
 }
 
+String htmlEscape(const String &in) {
+  String out;
+  out.reserve(in.length() + 8);
+  for (size_t i = 0; i < in.length(); i++) {
+    switch (in[i]) {
+      case '&':  out += "&amp;";  break;
+      case '\'': out += "&#39;";  break;
+      case '"':  out += "&quot;"; break;
+      case '<':  out += "&lt;";   break;
+      case '>':  out += "&gt;";   break;
+      default:   out += in[i];
+    }
+  }
+  return out;
+}
+
 void setup() {
   DEBUG_BEGIN(115200);
   #ifdef DEBUG
@@ -498,15 +563,18 @@ void setup() {
       frameHost = prefs.getString("frameHost", "fugleramme.local");
       framePort = prefs.getString("framePort", "8080");
       useSSL = prefs.getBool("useSSL", false);
+      adminPW = prefs.getString("adminPW","");
     }
   
     // Initialize WiFi STA mode first so NVS config loads properly
     WiFi.mode(WIFI_STA);
 
-    WiFiManagerParameter fuglerammeHost("frameHost", "Fugleramme Host", frameHost.c_str(), 128);
-    WiFiManagerParameter fuglerammePort("framePort", "Fugleramme Port", framePort.c_str(), 5);
+    WiFiManagerParameter fuglerammeHost("frameHost", "Fugleramme Host", htmlEscape(frameHost).c_str(), 128);
+    WiFiManagerParameter fuglerammePort("framePort", "Fugleramme Port", htmlEscape(framePort).c_str(), 5);
     const char* checkBoxHtml = useSSL ? "type=\"checkbox\" checked" : "type=\"checkbox\"";
-    WiFiManagerParameter SSL("useSSL", "USE HTTPS", "F", 2, checkBoxHtml);
+    WiFiManagerParameter SSL("useSSL", "Use HTTPS", "F", 2, checkBoxHtml, WFM_LABEL_AFTER);
+    WiFiManagerParameter fuglerammeAdminPW("adminPW", "Fugleramme Admin Password (Leave blank for no password)", htmlEscape(adminPW).c_str(), 128, "type=\"password\"");
+    WiFiManagerParameter br("<br/>");
     wm.setCustomHeadElement(
         "<script>"
         "document.addEventListener('DOMContentLoaded', function() {"
@@ -527,6 +595,9 @@ void setup() {
     wm.addParameter(&fuglerammeHost);
     wm.addParameter(&fuglerammePort);
     wm.addParameter(&SSL);
+    wm.addParameter(&br);
+    wm.addParameter(&br);
+    wm.addParameter(&fuglerammeAdminPW);
     wm.setEnableConfigPortal(configPortal || !wm.getWiFiIsSaved());
 
     APPass = generateRandomPassword();
@@ -537,6 +608,7 @@ void setup() {
 
     if(configPortal){
       Etag[0] = 0;
+      forceUpdate = true;
       
       wm.startWebPortal();
       displaySetupInfo(&wm);
@@ -547,16 +619,21 @@ void setup() {
 
     if(paramsChanged) {
       frameHost = fuglerammeHost.getValue();
+      frameHost.trim();
       framePort = fuglerammePort.getValue();
+      framePort.trim();
       useSSL = (String(SSL.getValue()).length() > 0);
+      adminPW = fuglerammeAdminPW.getValue();
 
       prefs.putString("frameHost", frameHost);
       prefs.putString("framePort", framePort);
       prefs.putBool("useSSL", useSSL);
+      prefs.putString("adminPW", adminPW);
     } else {
       frameHost = prefs.getString("frameHost", "fugleramme.local");
       framePort = prefs.getString("framePort", "8080");
       useSSL = prefs.getBool("useSSL", false);
+      adminPW = prefs.getString("adminPW","");
     }
 
     DEBUG_PRINTLN("Loaded frame host " + frameHost + ":" + framePort);
@@ -577,6 +654,7 @@ void setup() {
     WiFi.disconnect(true);   // true = also turn the radio off
     WiFi.mode(WIFI_OFF);
 
+    if(warning && need_refresh)   displayWarning();
     if(currentMode == SLEEP)      drawNoBattery(TFT_RED);
     else if(currentMode < FULL)   drawLowBattery(TFT_RED);    
 

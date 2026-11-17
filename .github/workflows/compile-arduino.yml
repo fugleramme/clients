@@ -51,6 +51,7 @@ jobs:
             - source-url: https://github.com/Seeed-Studio/Seeed_GFX.git
             - source-url: https://github.com/bakercp/CRC32.git
             - name: WiFiManager
+            - name: UrlEncode
       - name: Copy boot_app0.bin to build output
         run: |
           BOOT_APP0=$(find /tmp/arduino/build-cache/sketches -name "boot_app0.bin" 2>/dev/null | head -n 1)
