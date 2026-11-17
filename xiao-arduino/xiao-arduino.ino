@@ -288,6 +288,7 @@ void displaySetupInfo(WiFiManager *wifi) {
   epaper.drawString("Welcome to Fugleramme, please follow the setup instructions below", 800, 250);
 
   epaper.setFreeFont(&FreeSerif12pt7b);
+  epaper.drawString("Portal will timeout after 5 minutes.", 800, 310);
   
   if(WiFi.getMode() == WIFI_MODE_AP || WiFi.getMode() == WIFI_MODE_APSTA) {
     portalIP = WiFi.softAPIP().toString();
@@ -335,10 +336,11 @@ void press_button(char button) {
   http.end();
   switch(httpResponseCode) {
     case 204:
+      Etag[0] = 0;
       delay(5000); // Give frame server time to render new frame
       break;
     case 400:
-      DEBUG_PRINTF("Unknown button %c", button);
+      DEBUG_PRINTF("Unknown button %c\n", button);
       goToSleep(MIN_SLEEP_MINUTES);
       break;
     case 401:
@@ -351,7 +353,7 @@ void press_button(char button) {
       // This is going to just get handled by the main frame get
       break;
     default:
-      DEBUG_PRINTF("Unknown response from panel: %d", httpResponseCode);
+      DEBUG_PRINTF("Unknown response from panel: %d\n", httpResponseCode);
       goToSleep(MIN_SLEEP_MINUTES);
       break;
   }
@@ -554,8 +556,9 @@ void setup() {
     WiFiManagerParameter fuglerammeHost("frameHost", "Fugleramme Host", frameHost.c_str(), 128);
     WiFiManagerParameter fuglerammePort("framePort", "Fugleramme Port", framePort.c_str(), 5);
     const char* checkBoxHtml = useSSL ? "type=\"checkbox\" checked" : "type=\"checkbox\"";
-    WiFiManagerParameter SSL("useSSL", "USE HTTPS", "F", 2, checkBoxHtml);
+    WiFiManagerParameter SSL("useSSL", "Use HTTPS", "F", 2, checkBoxHtml, WFM_LABEL_AFTER);
     WiFiManagerParameter fuglerammeAdminPW("adminPW", "Fugleramme Admin Password (Leave blank for no password)", adminPW.c_str(), 128, "type=\"password\"");
+    WiFiManagerParameter br("<br/>");
     wm.setCustomHeadElement(
         "<script>"
         "document.addEventListener('DOMContentLoaded', function() {"
@@ -576,6 +579,8 @@ void setup() {
     wm.addParameter(&fuglerammeHost);
     wm.addParameter(&fuglerammePort);
     wm.addParameter(&SSL);
+    wm.addParameter(&br);
+    wm.addParameter(&br);
     wm.addParameter(&fuglerammeAdminPW);
     wm.setEnableConfigPortal(configPortal || !wm.getWiFiIsSaved());
 
@@ -587,6 +592,7 @@ void setup() {
 
     if(configPortal){
       Etag[0] = 0;
+      forceUpdate = true;
       
       wm.startWebPortal();
       displaySetupInfo(&wm);
@@ -597,7 +603,9 @@ void setup() {
 
     if(paramsChanged) {
       frameHost = fuglerammeHost.getValue();
+      frameHost.trim();
       framePort = fuglerammePort.getValue();
+      framePort.trim();
       useSSL = (String(SSL.getValue()).length() > 0);
       adminPW = fuglerammeAdminPW.getValue();
 
