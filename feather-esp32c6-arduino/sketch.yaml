@@ -1,0 +1,22 @@
+default_profile: default
+
+profiles:
+  # Adafruit Feather ESP32-C6. The 960 KB page is streamed to the panel, never
+  # buffered, so no PSRAM is needed.
+  #
+  # huge_app: WiFi + TLS overflow the default app slot.
+  # CDCOnBoot=cdc: Serial on the native USB, and keeps GPIO17 free for BUSY.
+  default:
+    fqbn: esp32:esp32:adafruit_feather_esp32c6:PartitionScheme=huge_app,CDCOnBoot=cdc
+    port: COM4 # change to your port
+    libraries:
+      - dir: libs/el133
+      - dir: libs/fuglefeed
+      - dir: libs/roboto
+      - ArduinoLog (1.1.1)
+      - Adafruit MAX1704X (1.0.3)
+      - Adafruit BusIO (1.17.4)
+      - PubSubClient (2.8)
+    platforms:
+      - platform: esp32:esp32 (3.3.11)
+        platform_index_url: https://espressif.github.io/arduino-esp32/package_esp32_index.json
