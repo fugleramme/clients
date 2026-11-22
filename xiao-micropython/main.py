@@ -866,9 +866,13 @@ except Exception as error:
 
 # The frame's poll decides the sleep; the minimum is the floor under it. Button
 # 1 forces a fresh page, button 2 asks for an update check at once when OTA is
-# on; EXT0 and EXT1 keep them distinguishable on the next wake.
-for pin in (BUTTON_REFRESH, BUTTON_NEXT):
-    machine.Pin(pin, machine.Pin.IN, machine.Pin.PULL_UP)
-esp32.wake_on_ext0(machine.Pin(BUTTON_REFRESH), 0)
-esp32.wake_on_ext1((machine.Pin(BUTTON_NEXT),), 0)
+# on; EXT0 and EXT1 keep them distinguishable on the next wake. A board that
+# fails to arm the buttons must still sleep: awake, it drains the battery.
+try:
+    for pin in (BUTTON_REFRESH, BUTTON_NEXT):
+        machine.Pin(pin, machine.Pin.IN, machine.Pin.PULL_UP)
+    esp32.wake_on_ext0(machine.Pin(BUTTON_REFRESH), 0)
+    esp32.wake_on_ext1((machine.Pin(BUTTON_NEXT),), 0)
+except Exception as error:
+    print("fugleramme: button wake not armed:", error)
 machine.deepsleep(minutes * 60 * 1000)
