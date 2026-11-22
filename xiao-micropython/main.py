@@ -748,7 +748,13 @@ class Panel:
             for num in (RST, DC) + LAYOUT.cs + (SCK, MOSI):
                 machine.Pin(num, machine.Pin.OUT, value=0, hold=True)
             machine.Pin(BUSY, machine.Pin.IN)
-            esp32.gpio_deep_sleep_hold(True)
+            # MicroPython 1.24+ leaves this out on chips that hold single pins
+            # through deep sleep, the ESP32-S3 among them: hold=True above does
+            # it there. Calling it anyway raised after every draw, so the new
+            # ETag was never saved and every wake redrew the same page.
+            hold = getattr(esp32, "gpio_deep_sleep_hold", None)
+            if hold is not None:
+                hold(True)
 
 
 def show(pixels) -> None:
