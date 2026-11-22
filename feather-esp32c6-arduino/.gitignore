@@ -1,0 +1,23 @@
+# Credentials
+src/secrets.h
+
+# Build output
+build/
+*.bin
+*.elf
+*.map
+
+# Arduino IDE / arduino-cli / PlatformIO
+.arduino/
+.pio/
+.vscode/
+.idea/
+
+# OS, editor and temporary files
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.bak
+*.tmp
+*.log
