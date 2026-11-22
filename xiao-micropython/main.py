@@ -125,6 +125,8 @@ BAT_ADC, ADC_EN, BAT_RATIO = 1, 6, 2.0
 NO_BATTERY = 3.0
 # Volts above LOW_BATTERY that lift the request to charge again.
 RECHARGED = 0.2
+# Only a charge reaches this; it restarts the counters the request reports.
+FULL_BATTERY = 4.1
 LOW_BATTERY_MESSAGE = (
     "The battery is nearly empty. Plug in a USB-C cable to charge it and bring the birds back."
 )
@@ -136,6 +138,9 @@ FRESH = {
     "poll": MIN_SLEEP_MINUTES,
     "wakes_since_firmware_check": 0,
     "wakes_since_redraw": 0,
+    # When the battery last read FULL_BATTERY, and the wakes since.
+    "charged_at": None,
+    "wakes_since_charge": 0,
     # The previous wake's work, reported by the next one.
     "last_wake_duration_ms": 0,
     "last_refresh_result": "",
@@ -876,9 +881,17 @@ def main(wake: str) -> int:
     print("battery:", round(volts, 2), "V")
     # A resting cell creeps back above LOW_BATTERY: once the request to charge
     # is up, only a real charge lifts it.
-    charged = LOW_BATTERY + (RECHARGED if state["shown"] == LOW_BATTERY_MESSAGE else 0)
-    low = NO_BATTERY <= volts < charged
-    state = dict(state, wakes_since_redraw=state["wakes_since_redraw"] + 1)
+    asked_to_charge = state["shown"].startswith(LOW_BATTERY_MESSAGE)
+    low = NO_BATTERY <= volts < LOW_BATTERY + (RECHARGED if asked_to_charge else 0)
+    if volts >= FULL_BATTERY or state["charged_at"] is None:
+        # Until a full charge is seen, count from the cold start: RTC time and
+        # memory survive deep sleep, not a power loss.
+        state = dict(state, charged_at=time.time(), wakes_since_charge=0)
+    state = dict(
+        state,
+        wakes_since_redraw=state["wakes_since_redraw"] + 1,
+        wakes_since_charge=state["wakes_since_charge"] + 1,
+    )
     if OTA_ENABLED:
         state = dict(state, wakes_since_firmware_check=state["wakes_since_firmware_check"] + 1)
     if state["last_refresh_result"] not in ("", "ok"):
@@ -935,11 +948,16 @@ def main(wake: str) -> int:
         except OSError:
             pass
         state = dict(state, failures=0)
-    if low and state["shown"] != LOW_BATTERY_MESSAGE:
+    if low and not asked_to_charge:
         # Drawn after the request, so the voltage is logged even if this fails.
-        print("fugleramme:", LOW_BATTERY_MESSAGE)
-        show(notice(LOW_BATTERY_MESSAGE))
-        state = dict(state, shown=LOW_BATTERY_MESSAGE, wakes_since_redraw=0)
+        days = (time.time() - state["charged_at"]) // 86_400
+        message = (
+            f"{LOW_BATTERY_MESSAGE} It ran {days} days and "
+            f"{state['wakes_since_charge']} wakes on this charge."
+        )
+        print("fugleramme:", message)
+        show(notice(message))
+        state = dict(state, shown=message, wakes_since_redraw=0)
     rtc.memory(json.dumps(state).encode())
     return max(state["poll"], MIN_SLEEP_MINUTES)
 
