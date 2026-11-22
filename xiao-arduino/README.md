@@ -19,8 +19,7 @@ On Fugleramme's admin page, enable **External e-ink panel** under **Frame** and 
 
 **\*Important:** The web flasher only supports Chromium-based browsers like Chrome, Edge, and Opera
 
-<img width="500" alt="xiao-epaper-display-board-ee02" src="https://github.com/user-attachments/assets/64d5de5c-ae78-42ac-a3ff-acf1ed2c37ed" />
-
+![Collage on a framed Spectra 6 13.3" eInk display](/assets/spectra-13_3.jpg)
 
 ## Update
 
