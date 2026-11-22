@@ -773,10 +773,12 @@ def show(pixels) -> None:
         blink((SHORT,) * 3)  # three short blinks: the refresh failed
         raise
     finally:
+        # The page is on the glass by now: no shutdown error may cost the
+        # caller the ETag, poll and trial confirmation it saves after this.
         try:
             panel.off()
-        except OSError:
-            pass
+        except Exception as error:
+            print("panel: shutdown failed:", error)
         led.value(1)
 
 
