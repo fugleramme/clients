@@ -8,3 +8,8 @@ replaced by `roboto_draw()` in `roboto_font.c`, which needs no framebuffer.
 
 Only the sizes the firmware uses are kept: 10 pt for the status line and 24 pt
 for the error screen. The other sizes (8-60 pt) are in the source repo if needed.
+
+## Licence
+
+Roboto is Copyright 2011 Google Inc. and licensed under the Apache License,
+Version 2.0. The full licence text is in [`LICENSE`](LICENSE).
