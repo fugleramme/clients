@@ -1,0 +1,50 @@
+name: Compile feather-esp32c6-arduino
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'feather-esp32c6-arduino/**'
+      - '.github/workflows/compile-feather-esp32c6-arduino.yml'
+  pull_request:
+    paths:
+      - 'feather-esp32c6-arduino/**'
+      - '.github/workflows/compile-feather-esp32c6-arduino.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: feather-esp32c6-arduino
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Cache Arduino Directories
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15
+            ~/Arduino
+          key: ${{ runner.os }}-feather-esp32c6-${{ hashFiles('feather-esp32c6-arduino/sketch.yaml') }}
+
+      # The real secrets.h is git-ignored; the template is enough to compile.
+      - name: Use secrets template
+        run: cp src/secrets_template.h src/secrets.h
+
+      # sketch.yaml pins the board, ESP32 core and library versions, and
+      # arduino-cli installs them on first use.
+      - name: Compile
+        run: arduino-cli compile --profile default --output-dir build_output
+
+      - name: Upload Compiled Binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: feather-esp32c6-arduino
+          path: feather-esp32c6-arduino/build_output/*.bin
+          if-no-files-found: error
