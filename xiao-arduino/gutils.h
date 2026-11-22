@@ -93,7 +93,8 @@ static void interleaveControllerRows(
 bool convertBuffer(
     uint8_t* buffer,
     size_t totalBytes,
-    size_t imageWidth)
+    size_t imageWidth,
+    bool rotate = false)
 {
     static const uint8_t nibbleMap[16] = {
         0xF, // 0x0 -> 0xF
@@ -121,36 +122,37 @@ bool convertBuffer(
         return false;
     }
 
-    /*
-     * Four pixels are required to make one pair of equally
-     * sized controller half-rows:
-     *
-     * 4 pixels / 2 pixels per byte = 2 bytes
-     * 1 byte per controller
-     */
-    if ((imageWidth % 4) != 0)
-        return false;
+    if(rotate){
+        /*
+        * Four pixels are required to make one pair of equally
+        * sized controller half-rows:
+        *
+        * 4 pixels / 2 pixels per byte = 2 bytes
+        * 1 byte per controller
+        */
+        if ((imageWidth % 4) != 0)
+            return false;
 
-    const size_t bytesPerFullRow = imageWidth / 2;
-    const size_t bytesPerHalfRow = imageWidth / 4;
+        const size_t bytesPerFullRow = imageWidth / 2;
+        const size_t bytesPerHalfRow = imageWidth / 4;
 
-    if (bytesPerFullRow == 0 ||
-        (totalBytes % bytesPerFullRow) != 0)
-    {
-        return false;
+        if (bytesPerFullRow == 0 ||
+            (totalBytes % bytesPerFullRow) != 0)
+        {
+            return false;
+        }
+
+        const size_t rowCount = totalBytes / bytesPerFullRow;
+
+        if (rowCount == 0)
+            return false;
+
+        // First assemble each complete row in place.
+        interleaveControllerRows(
+            buffer,
+            rowCount,
+            bytesPerHalfRow);
     }
-
-    const size_t rowCount = totalBytes / bytesPerFullRow;
-
-    if (rowCount == 0)
-        return false;
-
-    // First assemble each complete row in place.
-    interleaveControllerRows(
-        buffer,
-        rowCount,
-        bytesPerHalfRow);
-
     // Then convert every nibble in the assembled buffer.
     for (size_t i = 0; i < totalBytes; ++i)
     {
