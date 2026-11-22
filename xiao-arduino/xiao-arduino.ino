@@ -39,10 +39,20 @@ using fs::FS;
 #define uS_TO_S_FACTOR 1000000ULL /* Conversion factor for micro seconds to seconds */
 
 enum powerMode{ SLEEP, WARN, FULL };
+enum boardModel{ EE02, EE04 };
 
 RTC_DATA_ATTR char Etag[40] = "";
 RTC_DATA_ATTR powerMode lastMode = FULL;
 RTC_DATA_ATTR uint32_t lastErrorHash = 0;
+#if BOARD == BOARD_EE02
+  RTC_DATA_ATTR uint8_t rotation = 1;
+  boardModel board = EE02;
+#elif BOARD == BOARD_EE04
+  RTC_DATA_ATTR uint8_t rotation = 0;
+  boardModel board = EE04;
+#else
+  #error "Unsupported board"
+#endif
 
 String frameHost = "fugleramme.local";
 String framePort = "8080";
@@ -92,12 +102,15 @@ bool displayError(String message) {
   if (h == lastErrorHash && !modeChanged) return false;   // already on the panel
   lastErrorHash = h;
 
+  epaper.setRotation(rotation);
+
   epaper.fillScreen(TFT_WHITE);
   epaper.setTextColor(TFT_RED);
   epaper.setTextSize(1);
   epaper.setTextDatum(TC_DATUM);
   epaper.setFreeFont(&FreeSerif24pt7b);
-  drawWrapped(epaper, message, 800, 500, 1300, 60);
+  //if(board == EE04) epaper.setFreeFont(&FreeSerif12pt7b);
+  drawWrapped(epaper, message, epaper.width()/2, epaper.height()/2 - 100, epaper.width() - 40, 60);
 
   return true; // We need to refresh  
 }
@@ -111,13 +124,15 @@ void prepWarning(String message) {
 }
 
 void displayWarning() {
+  int width = epaper.width();
+  int height = epaper.height();
   epaper.setTextColor(TFT_RED);
   epaper.setTextSize(1);
   epaper.setTextDatum(TL_DATUM);
   epaper.setFreeFont(&FreeSerif12pt7b);
-  epaper.fillRoundRect(1180, 960, 400, 220, 10, TFT_WHITE);
-  epaper.drawRoundRect(1180, 960, 400, 220, 10, TFT_RED);
-  drawWrapped(epaper, warningMsg, 1200, 980, 360, 32);
+  epaper.fillRoundRect(width - 420, height - 240, 400, 220, 10, TFT_WHITE);
+  epaper.drawRoundRect(width - 420, height - 240, 400, 220, 10, TFT_RED);
+  drawWrapped(epaper, warningMsg, width - 400, height - 220, 360, 32);
 
   Etag[0] = 0;
   warning = false;
@@ -153,12 +168,11 @@ static bool readFully(NetworkClient &s, uint8_t *buf, size_t len, uint32_t timeo
   return true;
 }
 
-
 bool getFrame(String oldEtag, float battery, uint8_t &poll) {
   HTTPClient http;
 
   bool refresh = false;
-  const char* headerKeys[] = {"Etag"};
+  const char* headerKeys[] = {"Etag","Fugleramme-Rotation"};
   const size_t headerKeysCount = sizeof(headerKeys) / sizeof(headerKeys[0]);
   
   String URL = frameHost + ":" + framePort + "/frame.e6?battery=" + String(battery, 2);
@@ -181,6 +195,17 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
     delay(RETRY_DELAY_MS);
     startRequest();
     httpResponseCode = http.GET();
+  }
+
+  // Turns rotation from header into tft_espi rotation number:
+  // EE02: 0 -> 1, 90 -> 2, 180 -> 3, 270 -> 0
+  // EE04: 0 -> 0, 90 -> 1, 180 -> 2, 270 -> 3
+  String rotHeader = http.header("Fugleramme-Rotation");
+  rotHeader.replace("\"","");
+  
+  if(rotHeader.length() > 0) {
+    if(board == EE02) rotation = ((rotHeader.toInt() / 90) + 1) & 3;
+    if(board == EE04) rotation = rotHeader.toInt() / 90;
   }
 
   switch(httpResponseCode) {
@@ -223,11 +248,20 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
   Header header = {};
   char magic[] = {'E','6','F','1'};
 
+  int width = epaper.width();
+  int height = epaper.height();
+
+  // 13.3 header swaps its width/height
+  if(board == EE02) {
+    width = epaper.height();
+    height = epaper.width();
+  }
+
   if(readFully(sock, (uint8_t*)&header, sizeof(Header))) {
     if(memcmp(header.magic, magic, 4) == 0 && header.version == 1 && header.encoding == 1) {
-      DEBUG_PRINT("Valid page received, length ");
-      DEBUG_PRINTLN(header.length);
-      if(header.width == 1200 && header.height == 1600 && header.width * header.height / 2 == header.length) {
+      DEBUG_PRINTF("Valid page received, length %d\n", header.length);
+      DEBUG_PRINTF("Page size is %d x %d.\n", header.width, header.height);
+      if(header.width == width && header.height == height && header.width * header.height / 2 == header.length) {
         DEBUG_PRINTLN("Page is the correct size");
         uint8_t* pixels = (uint8_t*)ps_malloc(header.length);
 
@@ -237,20 +271,21 @@ bool getFrame(String oldEtag, float battery, uint8_t &poll) {
           // Short read: nothing to do
         } else if(CRC32::calculate(pixels, header.length) != header.crc) {
           DEBUG_PRINTLN("Checksum error!");
-        } else if(convertBuffer(pixels, header.length, header.width)) {
+        //} else if(convertBuffer(pixels, header.length, header.width)) {
+        } else if(convertBuffer(pixels, header.length, header.width, board == EE02)) {
           DEBUG_PRINTLN("We got a frame!");
           if (newEtag.length() < sizeof(Etag)) strlcpy(Etag, newEtag.c_str(), sizeof(Etag));
           else Etag[0] = 0;   // too long to store: never send a truncated ETag
           lastErrorHash = 0;
           epaper.setRotation(0);
           epaper.pushImage(0, 0, header.width, header.height, (uint16_t *)pixels);
-          epaper.setRotation(1);
+          epaper.setRotation(rotation);
           refresh = true;
         }
 
         free(pixels);  // free(NULL) is harmless
       } else {
-        refresh = displayError(String("The frame server sent an image of the wrong size. Please set the panel size to 1600 x 1200 on the admin page's \"Frame\" tab."));
+        refresh = displayError(String("The frame server sent an image of the wrong size. Please set the panel size to ") + epaper.width() + " x " + epaper.height() + " on the admin page's \"Frame\" tab.");
       }
     } else {
       DEBUG_PRINTLN("Magic doesn't match.");
@@ -269,7 +304,25 @@ void displaySetupInfo(WiFiManager *wifi) {
   Etag[0] = 0;
   int qr_width = 0;
   size_t qr_bytes = 0;
-  
+  int center = epaper.width()/2;
+  int titleY = 50;
+  int subtitle1Y = 250;
+  int subtitle2Y = 310;
+  int QRInfoY = 500;
+  int QRInfoW = 600;
+  int QRY = 700;
+  int QRScale = 8;
+
+  if(board == EE04) {
+    titleY = 10;
+    subtitle1Y = 100;
+    subtitle2Y = 125;
+    QRInfoY = 170;
+    QRInfoW = 350;
+    QRY = 320;
+    QRScale = 4;
+  }
+
   String portalIP;
   int portalQRLoc;
   int portalCenter;
@@ -278,36 +331,38 @@ void displaySetupInfo(WiFiManager *wifi) {
 
   epaper.fillScreen(TFT_WHITE);
   epaper.setTextColor(TFT_BLACK);
-  epaper.setTextSize(4);
+  if(board == EE02) epaper.setTextSize(4);
+  if(board == EE04) epaper.setTextSize(2);
   epaper.setFreeFont(&FreeSerifItalic24pt7b);
   epaper.setTextDatum(TC_DATUM);
-  epaper.drawString("Fugleramme", 800, 50);
+  epaper.drawString("Fugleramme", center, titleY);
 
   epaper.setTextSize(1);
-  epaper.setFreeFont(&FreeSerif24pt7b);
-  epaper.drawString("Welcome to Fugleramme, please follow the setup instructions below", 800, 250);
+  if(board == EE02) epaper.setFreeFont(&FreeSerif24pt7b);
+  if(board == EE04) epaper.setFreeFont(&FreeSerif12pt7b);
+  epaper.drawString("Welcome to Fugleramme, please follow the setup instructions below", center, subtitle1Y);
 
   epaper.setFreeFont(&FreeSerif12pt7b);
-  epaper.drawString("Portal will timeout after 5 minutes.", 800, 310);
+  epaper.drawString("Portal will timeout after 5 minutes.", center, subtitle2Y);
   
   if(WiFi.getMode() == WIFI_MODE_AP || WiFi.getMode() == WIFI_MODE_APSTA) {
     portalIP = WiFi.softAPIP().toString();
-    drawWrapped(epaper, "To connect to wifi, scan the QR code below or manually connect to the network: " + wifi->getConfigPortalSSID() + " with password " + APPass, 400, 500, 600, 32);
-    uint8_t* wifiQR = generateQRBitmap(("WIFI:S:" + wifi->getConfigPortalSSID() + ";T:WPA;P:" + APPass + ";;").c_str(), 8, 10, qr_width, qr_bytes);
-    int wifiQRLoc = (800 - qr_width) / 2;
-    portalCenter = 1200;
-    epaper.drawBitmap(wifiQRLoc, 700, wifiQR, qr_width, qr_width, TFT_BLACK);
+    drawWrapped(epaper, "To connect to wifi, scan the QR code below or manually connect to the network: " + wifi->getConfigPortalSSID() + " with password " + APPass, center/2, QRInfoY, QRInfoW, 32);
+    uint8_t* wifiQR = generateQRBitmap(("WIFI:S:" + wifi->getConfigPortalSSID() + ";T:WPA;P:" + APPass + ";;").c_str(), QRScale, 10, qr_width, qr_bytes);
+    int wifiQRLoc = (center - qr_width) / 2;
+    portalCenter = center + center/2;
+    epaper.drawBitmap(wifiQRLoc, QRY, wifiQR, qr_width, qr_width, TFT_BLACK);
     free(wifiQR);
   } else {
     portalIP = WiFi.localIP().toString();
-    portalCenter = 800;
+    portalCenter = center;
   }
 
-  drawWrapped(epaper, "To configure the frame, scan the QR code below, or visit http://" + portalIP + " in your browser and follow the instructions.", portalCenter, 500, 600, 32);
+  drawWrapped(epaper, "To configure the frame, scan the QR code below, or visit http://" + portalIP + " in your browser and follow the instructions.", portalCenter, QRInfoY, QRInfoW, 32);
   
-  uint8_t* portalQR = generateQRBitmap(("http://" + portalIP).c_str(), 8, 10, qr_width, qr_bytes);
+  uint8_t* portalQR = generateQRBitmap(("http://" + portalIP).c_str(), QRScale, 10, qr_width, qr_bytes);
   portalQRLoc = portalCenter - (qr_width / 2);
-  epaper.drawBitmap(portalQRLoc, 700, portalQR, qr_width, qr_width, TFT_BLACK);
+  epaper.drawBitmap(portalQRLoc, QRY, portalQR, qr_width, qr_width, TFT_BLACK);
   
   epaper.update();
   epaper.sleep();
@@ -533,10 +588,9 @@ void setup() {
   handle_wakeup();
 
   epaper.begin();
-
-  DEBUG_PRINTF("rotation-0  Width: %d, Height: %d\n", epaper.width(), epaper.height());
-  epaper.setRotation(1);
-  DEBUG_PRINTF("rotation-1  Width: %d, Height: %d\n", epaper.width(), epaper.height());
+  epaper.setRotation(rotation);
+  DEBUG_PRINTF("Width: %d, Height: %d\n", epaper.width(), epaper.height());
+  DEBUG_PRINTF("Rotation is %d\n", rotation);
   epaper.sleep();
 
   uint8_t sleepMin = MIN_SLEEP_MINUTES;
