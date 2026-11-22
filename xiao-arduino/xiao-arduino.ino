@@ -50,14 +50,14 @@ RTC_DATA_ATTR uint32_t lastErrorHash = 0;
 #elif BOARD == BOARD_EE04
   RTC_DATA_ATTR uint8_t rotation = 0;
   boardModel board = EE04;
+#else
+  #error "Unsupported board"
 #endif
 
 String frameHost = "fugleramme.local";
 String framePort = "8080";
 String adminPW = "";
 String warningMsg = "";
-int width = 0;
-int height = 0;
 bool useSSL = false;
 bool forceUpdate = false;
 bool configPortal = false;
@@ -101,6 +101,8 @@ bool displayError(String message) {
   for (size_t i = 0; i < message.length(); i++) h = h * 33 + (uint8_t)message[i];
   if (h == lastErrorHash && !modeChanged) return false;   // already on the panel
   lastErrorHash = h;
+
+  epaper.setRotation(rotation);
 
   epaper.fillScreen(TFT_WHITE);
   epaper.setTextColor(TFT_RED);
@@ -311,7 +313,7 @@ void displaySetupInfo(WiFiManager *wifi) {
   int QRY = 700;
   int QRScale = 8;
 
-  if(board = EE04) {
+  if(board == EE04) {
     titleY = 10;
     subtitle1Y = 100;
     subtitle2Y = 125;
