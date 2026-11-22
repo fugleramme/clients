@@ -8,12 +8,14 @@ frame page on the glass (or none if a notice replaced it); an unchanged page
 costs a 304 and nothing else. A new one is downloaded whole, checked, and only
 then sent to the panel. The frame may be served over HTTPS, which the port
 picks. Then it sleeps for the poll the page's header carries, which is the
-admin's "Panel refresh", never below MIN_SLEEP_MINUTES. Below LOW_BATTERY it
-also shows "Battery low" once and sleeps for at least
-LOW_BATTERY_SLEEP_MINUTES, but keeps fetching and drawing the page, and posts
-its voltage and firmware hash as query parameters on every request to the
-frame (a USB-powered board sits around 4.0 V, so it never crosses the default
-threshold).
+admin's "Panel refresh", never below MIN_SLEEP_MINUTES.
+
+Every page request carries the panel's health as query parameters: battery
+voltage, a CRC32 of its program, wake counters and how the previous wake and
+its refresh went. The frame's access log is the telemetry; the frame parses
+nothing. Below LOW_BATTERY the panel asks once to be charged and then draws
+nothing more, so the request stays on the glass once the battery is flat, but
+it keeps requesting the page so the log follows the cell as it drains.
 
 When something goes wrong the panel says so in black on white, once: a page
 that does not fit this panel or a frame that is not serving one at once, a
@@ -78,8 +80,8 @@ FIRMWARE = getattr(config, "FIRMWARE", None)
 OTA_ENABLED = isinstance(FIRMWARE, str)
 MIN_SLEEP_MINUTES = config.MIN_SLEEP_MINUTES
 NOTICE_AFTER = config.NOTICE_AFTER
-LOW_BATTERY = getattr(config, "LOW_BATTERY", 3.5)
-LOW_BATTERY_SLEEP_MINUTES = getattr(config, "LOW_BATTERY_SLEEP_MINUTES", 60)
+# OTA replaces main.py but not config.py, so an older config.py may lack it.
+LOW_BATTERY = getattr(config, "LOW_BATTERY", 3.6)
 WIDTH = config.WIDTH
 HEIGHT = config.HEIGHT
 
@@ -118,31 +120,31 @@ SHORT, LONG = 120, 480
 
 # ADC_EN gates VBAT through a 10K/10K divider into BAT_ADC.
 BAT_ADC, ADC_EN, BAT_RATIO = 1, 6, 2.0
-# Below LOW_BATTERY the glass says "Battery low" once and the frame sleeps for
-# at least LOW_BATTERY_SLEEP_MINUTES. Both are overridable in config.py: a
-# USB-powered board sits around 4.0 V, so it never crosses the default 3.5 V.
-
-# Every request to the frame carries these, so its access log is the telemetry.
-BATTERY_VOLTS = 0.0
-FIRMWARE_DIGEST = ""
-REFRESHES_SINCE_FIRMWARE_CHECK = 0
-REFRESHES_SINCE_REDRAW = 0
-LAST_WAKE_DURATION_MS = 0
-LAST_REFRESH_RESULT = ""
-LAST_REFRESH_DURATION_MS = 0
+# No cell powering the board reads below this: a lower reading means none is
+# connected (USB only) or the read failed.
+NO_BATTERY = 3.0
+# Volts above LOW_BATTERY that lift the request to charge again.
+RECHARGED = 0.2
+LOW_BATTERY_MESSAGE = (
+    "The battery is nearly empty. Plug in a USB-C cable to charge it and bring the birds back."
+)
 
 FRESH = {
     "etag": "",
     "shown": "",
     "failures": 0,
     "poll": MIN_SLEEP_MINUTES,
-    "refreshes_since_firmware_check": 0,
-    "refreshes_since_redraw": 0,
+    "wakes_since_firmware_check": 0,
+    "wakes_since_redraw": 0,
+    # The previous wake's work, reported by the next one.
     "last_wake_duration_ms": 0,
     "last_refresh_result": "",
     "last_refresh_duration_ms": 0,
     "ota_failures": 0,
 }
+
+# (result, duration in ms) of this wake's last panel refresh, if it had one.
+LAST_REFRESH = None
 
 # EE02 and EE04 wiring, from Seeed_GFX2's XIAO_ePaper_Board_Configs.h. Only the
 # EE02 has CS1, for the 13.3"'s second controller.
@@ -331,54 +333,50 @@ def disconnect() -> None:
 
 
 def battery() -> float:
-    """Battery voltage, averaged through the gated divider and corrected for it."""
-    enable = machine.Pin(ADC_EN, machine.Pin.OUT, value=0)
-    adc = machine.ADC(machine.Pin(BAT_ADC))
-    adc.atten(machine.ADC.ATTN_11DB)
-    enable.value(1)
+    """Battery voltage, averaged through the gated divider and corrected for
+    it. A failed read must never stop a wake, so it returns 0.0: unknown."""
     try:
-        time.sleep_ms(10)
-        microvolts = sum(adc.read_uv() for _ in range(5))
-    finally:
-        enable.value(0)
+        enable = machine.Pin(ADC_EN, machine.Pin.OUT, value=0)
+        adc = machine.ADC(machine.Pin(BAT_ADC))
+        adc.atten(machine.ADC.ATTN_11DB)
+        enable.value(1)
+        try:
+            time.sleep_ms(10)
+            microvolts = sum(adc.read_uv() for _ in range(5))
+        finally:
+            enable.value(0)
+    except Exception as error:
+        print("battery: read failed:", error)
+        return 0.0
     return microvolts / 5 / 1_000_000 * BAT_RATIO
 
 
 def firmware_hash() -> str:
-    """A CRC32 of the program on disk, to tell firmware versions apart.
-
-    It is read before the wake's page fetch, so right after an OTA swap it
-    already describes the staged program while the previous one still runs
-    until the next reboot."""
+    """A CRC32 of the running program, to tell firmware versions apart."""
     try:
         with open("main.py", "rb") as file:
-            source = file.read()
+            return f"{binascii.crc32(file.read()) & 0xFFFFFFFF:08x}"
     except OSError:
         return ""
-    return f"{binascii.crc32(source) & 0xFFFFFFFF:08x}"
 
 
-def status_path(path: str) -> str:
-    """Add this wake's status to the request the access log sees."""
-    separator = "&" if "?" in path else "?"
+def status(volts: float, state: dict) -> str:
+    """This wake's health as a query string: the frame's access log is the
+    telemetry, the frame parses nothing."""
     parts = []
-    # Zero means the ADC has not produced a meaningful reading yet.
-    if BATTERY_VOLTS > 0:
-        parts.append(f"battery={BATTERY_VOLTS:.2f}")
-    parts += [
-        f"firmware={FIRMWARE_DIGEST}",
-        f"refreshes_since_firmware_check={REFRESHES_SINCE_FIRMWARE_CHECK}",
-        f"refreshes_since_redraw={REFRESHES_SINCE_REDRAW}",
-    ]
-    # Zero means no completed previous wake survived in RTC memory (power loss).
-    if LAST_WAKE_DURATION_MS:
-        parts.append(f"last_wake_duration_ms={LAST_WAKE_DURATION_MS}")
-    if LAST_REFRESH_RESULT:
-        parts += [
-            f"last_refresh_result={LAST_REFRESH_RESULT}",
-            f"last_refresh_duration_ms={LAST_REFRESH_DURATION_MS}",
-        ]
-    return f"{path}{separator}" + "&".join(parts)
+    if volts:
+        parts.append(f"battery={volts:.2f}")
+    parts.append(f"firmware={firmware_hash()}")
+    if OTA_ENABLED:
+        parts.append(f"wakes_since_firmware_check={state['wakes_since_firmware_check']}")
+    parts.append(f"wakes_since_redraw={state['wakes_since_redraw']}")
+    # Zero after a power loss, which RTC memory does not survive.
+    if state["last_wake_duration_ms"]:
+        parts.append(f"last_wake_duration_ms={state['last_wake_duration_ms']}")
+    if state["last_refresh_result"]:
+        parts.append(f"last_refresh_result={state['last_refresh_result']}")
+        parts.append(f"last_refresh_duration_ms={state['last_refresh_duration_ms']}")
+    return "&".join(parts)
 
 
 def there(name: str) -> bool:
@@ -436,8 +434,6 @@ def _get(path: str, etag: str, target=None):
         if tls:
             # server_hostname carries the SNI the frame's certificate needs.
             sock = ssl.wrap_socket(sock, server_hostname=host)
-        if (host, port) == (FRAME_HOST, FRAME_PORT):
-            path = status_path(path)
         request = f"GET {path} HTTP/1.0\r\nHost: {host}\r\n"
         if etag:
             request += f"If-None-Match: {etag}\r\n"
@@ -459,11 +455,11 @@ def _get(path: str, etag: str, target=None):
         raise
 
 
-def fetch(etag: str):
+def fetch(etag: str, query: str):
     """Returns (page, poll): page is None when the frame still has the one
     drawn, and poll is None with it, since a page the frame revalidates
     carries the same poll as the one on the glass."""
-    sock, status, new_etag, _length = _get("/frame.e6", etag)
+    sock, status, new_etag, _length = _get(f"/frame.e6?{query}", etag)
     try:
         if status == 304:
             # Unchanged: the frame has nothing to send and the glass keeps its birds.
@@ -513,11 +509,11 @@ def fetch(etag: str):
         sock.close()
 
 
-def download(etag: str, refresh: bool = False):
+def download(etag: str, query: str, refresh: bool = False):
     try:
         connect()
         # A forced refresh asks for the body even when our ETag still matches.
-        return fetch("" if refresh else etag)
+        return fetch("" if refresh else etag, query)
     except Problem:
         raise
     except Exception as error:
@@ -578,7 +574,7 @@ def update(state: dict, asked: bool):
     boot.py rolls it back if it fails its trial."""
     if not OTA_ENABLED:
         return state, None
-    if not asked and state["refreshes_since_firmware_check"] < OTA_EVERY_N_RUNS:
+    if not asked and state["wakes_since_firmware_check"] < OTA_EVERY_N_RUNS:
         return state, None
     if there("main.py.bak"):
         # A trial is still unconfirmed; installing now would overwrite the way
@@ -591,11 +587,11 @@ def update(state: dict, asked: bool):
         # The counter goes back to zero: a failed check waits a full interval
         # for the next one instead of retrying on every wake.
         return dict(
-            state, refreshes_since_firmware_check=0, ota_failures=state["ota_failures"] + 1
+            state, wakes_since_firmware_check=0, ota_failures=state["ota_failures"] + 1
         ), problem
     if answer is None:
         print("ota: up to date")
-        return dict(state, refreshes_since_firmware_check=0, ota_failures=0), None
+        return dict(state, wakes_since_firmware_check=0, ota_failures=0), None
     source, served = answer
     print("ota: installing", served)
     try:
@@ -834,8 +830,9 @@ def show(pixels) -> None:
     """One attempt only: a refresh that fails from the partial-charge window
     cannot be retried with a short power cycle; the next wake's takeover
     recovers the panel instead."""
-    global LAST_REFRESH_RESULT, LAST_REFRESH_DURATION_MS
+    global LAST_REFRESH
     started = time.ticks_ms()
+    result = "io_error"
     # LED held on while the panel refreshes (~30 s): do not press anything,
     # and do not unplug, until it goes out.
     panel = Panel()
@@ -843,25 +840,20 @@ def show(pixels) -> None:
     try:
         panel.on()
         panel.draw(pixels)
-        LAST_REFRESH_RESULT = "ok"
+        result = "ok"
     except OSError as error:
-        LAST_REFRESH_RESULT = getattr(error, "code", "io_error")
+        result = getattr(error, "code", result)
         print("panel: refresh failed:", error)
         led.value(1)
         blink((SHORT,) * 3)  # three short blinks: the refresh failed
         raise
     finally:
-        LAST_REFRESH_DURATION_MS = time.ticks_diff(time.ticks_ms(), started)
+        LAST_REFRESH = (result, time.ticks_diff(time.ticks_ms(), started))
         try:
             panel.off()
         except OSError:
             pass
         led.value(1)
-
-
-def sleep_minutes(state: dict, floor: int) -> int:
-    """The frame's poll (the admin's "Panel refresh"), never below the floor."""
-    return max(state["poll"], floor)
 
 
 def load(rtc) -> dict:
@@ -878,45 +870,24 @@ def main(wake: str) -> int:
     refresh = wake == "refresh"
     # Button 2 asks for an immediate update check; button 1 only repaints.
     asked = wake == "update"
-    try:
-        volts = battery()
-    except Exception as error:
-        # A failed ADC read must never stop a wake: 0.0 is reported as unknown.
-        print("fugleramme: battery read failed:", error)
-        volts = 0.0
-    print("battery:", round(volts, 2), "V")
-    global BATTERY_VOLTS, FIRMWARE_DIGEST, LAST_WAKE_DURATION_MS
-    global REFRESHES_SINCE_FIRMWARE_CHECK, REFRESHES_SINCE_REDRAW
-    global LAST_REFRESH_RESULT, LAST_REFRESH_DURATION_MS
-    BATTERY_VOLTS = volts
-    FIRMWARE_DIGEST = firmware_hash()
     rtc = machine.RTC()
     state = load(rtc)
+    volts = battery()
+    print("battery:", round(volts, 2), "V")
+    # A resting cell creeps back above LOW_BATTERY: once the request to charge
+    # is up, only a real charge lifts it.
+    charged = LOW_BATTERY + (RECHARGED if state["shown"] == LOW_BATTERY_MESSAGE else 0)
+    low = NO_BATTERY <= volts < charged
+    state = dict(state, wakes_since_redraw=state["wakes_since_redraw"] + 1)
     if OTA_ENABLED:
-        state = dict(
-            state,
-            refreshes_since_firmware_check=state["refreshes_since_firmware_check"] + 1,
-        )
-    state = dict(
-        state,
-        refreshes_since_redraw=state["refreshes_since_redraw"] + 1,
-    )
-    REFRESHES_SINCE_FIRMWARE_CHECK = state["refreshes_since_firmware_check"]
-    REFRESHES_SINCE_REDRAW = state["refreshes_since_redraw"]
-    LAST_WAKE_DURATION_MS = state["last_wake_duration_ms"]
-    LAST_REFRESH_RESULT = state["last_refresh_result"]
-    LAST_REFRESH_DURATION_MS = state["last_refresh_duration_ms"]
-    if LAST_REFRESH_RESULT not in ("", "ok"):
+        state = dict(state, wakes_since_firmware_check=state["wakes_since_firmware_check"] + 1)
+    if state["last_refresh_result"] not in ("", "ok"):
         # The last refresh failed, so the glass does not necessarily hold this
         # page. Force the body fetch even if its ETag still matches.
         state = dict(state, etag="")
-    # A 0.0 reading means the voltage is unknown, not low.
-    low = 0 < volts < LOW_BATTERY
-    floor = LOW_BATTERY_SLEEP_MINUTES if low else MIN_SLEEP_MINUTES
     rtc.memory(json.dumps(state).encode())
     state, problem = update(state, asked)
-    REFRESHES_SINCE_FIRMWARE_CHECK = state["refreshes_since_firmware_check"]
-    if problem is not None and state["ota_failures"] >= NOTICE_AFTER:
+    if problem is not None and state["ota_failures"] >= NOTICE_AFTER and not low:
         # An update that keeps failing is worth the glass saying so. It never
         # costs this wake's page, though: the page below is still fetched and
         # drawn, and when it moves it replaces the notice.
@@ -924,53 +895,53 @@ def main(wake: str) -> int:
         print("fugleramme:", message)
         if message != state["shown"]:
             show(notice(message))
-            state = dict(state, shown=message, refreshes_since_redraw=0)
+            state = dict(state, shown=message, wakes_since_redraw=0)
         rtc.memory(json.dumps(state).encode())
-    if low:
-        # The glass says so; the page below is still fetched and drawn, and
-        # replaces the notice. Only the sleep floor changes.
-        message = f"Battery low: {volts:.1f} V"
-        print("fugleramme:", message)
-        if message != state["shown"]:
-            show(notice(message))
-            state = dict(state, shown=message, refreshes_since_redraw=0)
-        state = dict(state, failures=0)
-        rtc.memory(json.dumps(state).encode())
+    # A notice is not the page: ask for the body even when the saved page ETag
+    # still matches, so the next good wake replaces the notice. When low, the
+    # page is still requested, so the log follows the cell as it drains, but
+    # never drawn, so the saved ETag spares the body.
+    etag = state["etag"] if low or not state["shown"] else ""
     try:
-        # A notice is not the page: ask for the body even when the saved page
-        # ETag still matches, so the next good wake replaces the notice.
-        etag = "" if state["shown"] else state["etag"]
-        page, poll = download(etag, refresh)
+        page, poll = download(etag, status(volts, state), refresh)
     except Problem as problem:
         failures = state["failures"] + 1
         message = str(problem)
         print("fugleramme:", message)
-        if message != state["shown"] and (problem.lasting or failures >= NOTICE_AFTER):
+        # Below LOW_BATTERY the request to charge stays on the glass instead.
+        if not low and message != state["shown"] and (problem.lasting or failures >= NOTICE_AFTER):
             # Show lasting errors at once, but wait for repeated transient failures.
             # The message check avoids redrawing the same notice.
             show(notice(message))
 
             # No ETag: the next page that arrives replaces the notice. The poll is
             # the frame's, not the page's, so it outlives the reset.
-            state = dict(state, etag="", shown=message, refreshes_since_redraw=0)
+            state = dict(state, etag="", shown=message, wakes_since_redraw=0)
         state = dict(state, failures=failures)
-        rtc.memory(json.dumps(state).encode())
-        return sleep_minutes(state, floor)
-    if poll is not None:
-        state = dict(state, poll=poll)
-    if page is not None:
-        pixels, etag = page
-        show(pixels)
-        print("drew")
-        state = dict(state, etag=etag, shown="", refreshes_since_redraw=0)
-    # This wake reached the frame without a problem, which is the trial's
-    # confirmation: boot.py keeps main.py.bak exactly until it sees this.
-    try:
-        os.remove("main.py.bak")
-    except OSError:
-        pass
-    rtc.memory(json.dumps(dict(state, failures=0)).encode())
-    return sleep_minutes(state, floor)
+    else:
+        if poll is not None:
+            state = dict(state, poll=poll)
+        # Below LOW_BATTERY the page would replace the request to charge, and
+        # the glass must keep that once the battery is flat.
+        if page is not None and not low:
+            pixels, etag = page
+            show(pixels)
+            print("page: drawn")
+            state = dict(state, etag=etag, shown="", wakes_since_redraw=0)
+        # This wake reached the frame without a problem, which is the trial's
+        # confirmation: boot.py keeps main.py.bak exactly until it sees this.
+        try:
+            os.remove("main.py.bak")
+        except OSError:
+            pass
+        state = dict(state, failures=0)
+    if low and state["shown"] != LOW_BATTERY_MESSAGE:
+        # Drawn after the request, so the voltage is logged even if this fails.
+        print("fugleramme:", LOW_BATTERY_MESSAGE)
+        show(notice(LOW_BATTERY_MESSAGE))
+        state = dict(state, shown=LOW_BATTERY_MESSAGE, wakes_since_redraw=0)
+    rtc.memory(json.dumps(state).encode())
+    return max(state["poll"], MIN_SLEEP_MINUTES)
 
 
 # Immediate feedback on why the board woke, before anything slow happens:
@@ -986,19 +957,21 @@ except Exception as error:
     print("fugleramme:", error)
     minutes = MIN_SLEEP_MINUTES
 
-# Record this wake's work before deep sleep makes the next request. The value
-# is reported by the next wake.
-rtc = machine.RTC()
-state = load(rtc)
-state = dict(
-    state,
-    last_wake_duration_ms=time.ticks_diff(time.ticks_ms(), RUN_STARTED_MS),
-    last_refresh_result=LAST_REFRESH_RESULT,
-    last_refresh_duration_ms=LAST_REFRESH_DURATION_MS,
+# Record this wake's work for the next wake to report.
+_rtc = machine.RTC()
+_result, _duration = LAST_REFRESH or ("", 0)
+_rtc.memory(
+    json.dumps(
+        dict(
+            load(_rtc),
+            last_wake_duration_ms=time.ticks_diff(time.ticks_ms(), RUN_STARTED_MS),
+            last_refresh_result=_result,
+            last_refresh_duration_ms=_duration,
+        )
+    ).encode()
 )
-rtc.memory(json.dumps(state).encode())
 
-print("sleep", minutes, "min")
+print("sleep:", minutes, "min")
 
 # The frame's poll decides the sleep; the minimum is the floor under it. Button
 # 1 forces a fresh page, button 2 asks for an update check at once when OTA is
