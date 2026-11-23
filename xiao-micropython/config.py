@@ -24,6 +24,12 @@ MIN_SLEEP_MINUTES = 5
 # Failed wakes in a row before an unreachable frame is worth a refresh.
 NOTICE_AFTER = 3
 
+# The battery voltage below which the panel asks to be charged, once, and
+# stops drawing pages so the request stays on the glass. The board reads the
+# raw cell, so a one-cell LiPo is full around 4.2 V and a USB-powered board
+# sits near 4.0 V.
+LOW_BATTERY = 3.6
+
 # The panel's size picks its driver: 1200, 1600 for the 13.3" on a XIAO
 # EE02, 800, 480 for the 7.3" on a XIAO EE04.
 WIDTH, HEIGHT = 1200, 1600
