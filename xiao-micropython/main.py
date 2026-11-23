@@ -828,7 +828,13 @@ class Panel:
             for num in (RST, DC) + LAYOUT.cs + (SCK, MOSI):
                 machine.Pin(num, machine.Pin.OUT, value=0, hold=True)
             machine.Pin(BUSY, machine.Pin.IN)
-            esp32.gpio_deep_sleep_hold(True)
+            # MicroPython 1.24+ leaves this out on chips that hold single pins
+            # through deep sleep, the ESP32-S3 among them: hold=True above does
+            # it there. Calling it anyway raised after every draw, so the new
+            # ETag was never saved and every wake redrew the same page.
+            hold = getattr(esp32, "gpio_deep_sleep_hold", None)
+            if hold is not None:
+                hold(True)
 
 
 def show(pixels) -> None:
@@ -854,10 +860,12 @@ def show(pixels) -> None:
         raise
     finally:
         LAST_REFRESH = (result, time.ticks_diff(time.ticks_ms(), started))
+        # The page is on the glass by now: no shutdown error may cost the
+        # caller the ETag, poll and trial confirmation it saves after this.
         try:
             panel.off()
-        except OSError:
-            pass
+        except Exception as error:
+            print("panel: shutdown failed:", error)
         led.value(1)
 
 
@@ -993,9 +1001,13 @@ print("sleep:", minutes, "min")
 
 # The frame's poll decides the sleep; the minimum is the floor under it. Button
 # 1 forces a fresh page, button 2 asks for an update check at once when OTA is
-# on; EXT0 and EXT1 keep them distinguishable on the next wake.
-for pin in (BUTTON_REFRESH, BUTTON_NEXT):
-    machine.Pin(pin, machine.Pin.IN, machine.Pin.PULL_UP)
-esp32.wake_on_ext0(machine.Pin(BUTTON_REFRESH), 0)
-esp32.wake_on_ext1((machine.Pin(BUTTON_NEXT),), 0)
+# on; EXT0 and EXT1 keep them distinguishable on the next wake. A board that
+# fails to arm the buttons must still sleep: awake, it drains the battery.
+try:
+    for pin in (BUTTON_REFRESH, BUTTON_NEXT):
+        machine.Pin(pin, machine.Pin.IN, machine.Pin.PULL_UP)
+    esp32.wake_on_ext0(machine.Pin(BUTTON_REFRESH), 0)
+    esp32.wake_on_ext1((machine.Pin(BUTTON_NEXT),), 0)
+except Exception as error:
+    print("fugleramme: button wake not armed:", error)
 machine.deepsleep(minutes * 60 * 1000)
